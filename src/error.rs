@@ -14,12 +14,9 @@ pub enum RspamdError {
     #[error("Unknown error")]
     Unknown,
 
-    #[error("Async HTTP request failed: {0}")]
-    AsyncHttpError(String),
-
-    #[error("Async Serialization/Deserialization error: {0}")]
-    AsyncSerdeError(#[from] reqwest::Error),
-
     #[error("IO error: {0}")]
     IOError(#[from] std::io::Error),
+
+    #[error("URL parsing error: {0}")]
+    ParseError(#[from] url::ParseError),
 }
