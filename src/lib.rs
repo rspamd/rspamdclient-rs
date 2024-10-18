@@ -11,4 +11,4 @@ pub use backend::sync_client::SyncClient;
 pub use backend::async_client::AsyncClient;
 
 #[cfg(feature = "async")]
-pub use backend::async_client::client;
+pub use backend::async_client::scan_async;

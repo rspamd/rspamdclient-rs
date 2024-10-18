@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
+use bytes::Bytes;
 use reqwest::{Client, Url};
 
 use crate::backend::traits::*;
 use crate::config::Config;
 use crate::error::RspamdError;
 use crate::protocol::commands::{RspamdCommand, RspamdEndpoint};
+use crate::protocol::RspamdScanReply;
 
 pub struct AsyncClient<'a> {
 	config: &'a Config,
@@ -49,7 +51,7 @@ pub fn client(options: &Config) -> Result<AsyncClient, RspamdError> {
 pub struct ReqwestRequest<'a> {
 	endpoint: RspamdEndpoint<'a>,
 	client: AsyncClient<'a>,
-	body: &'a str,
+	body: Bytes,
 }
 
 #[maybe_async::maybe_async]
@@ -70,7 +72,7 @@ impl<'a> Request for ReqwestRequest<'a> {
 		}
 
 		if self.endpoint.need_body {
-			req = req.body(self.body.to_owned());
+			req = req.body(self.body.clone());
 		}
 		let req = req.build()?;
 		let response = self.client.inner.execute(req).await
@@ -114,17 +116,27 @@ impl<'a> Request for ReqwestRequest<'a> {
 	}
 }
 
-
+#[maybe_async::maybe_async]
 impl<'a> ReqwestRequest<'a> {
-	pub async fn new(
+	pub async fn new<T: Into<Bytes>>(
 		client: AsyncClient<'a>,
-		body: &'a str,
+		body: T,
 		command: RspamdCommand,
 	) -> Result<ReqwestRequest<'a>, RspamdError> {
 		Ok(Self {
 			endpoint: RspamdEndpoint::from_command(command),
 			client,
-			body,
+			body: body.into(),
 		})
 	}
+}
+
+#[maybe_async::maybe_async]
+pub async fn scan_async<T: Into<Bytes>>(options: &Config, body: T) -> Result<RspamdScanReply, RspamdError> {
+	let client = client(options)?;
+	let request = ReqwestRequest::new(client, body, RspamdCommand::Scan).await?;
+	let response = request.response().await?;
+	let response = response.text().await?;
+	let response = serde_json::from_str::<RspamdScanReply>(&response)?;
+	Ok(response)
 }
