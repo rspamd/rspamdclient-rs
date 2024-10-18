@@ -19,4 +19,7 @@ pub enum RspamdError {
 
     #[error("Async Serialization/Deserialization error: {0}")]
     AsyncSerdeError(#[from] reqwest::Error),
+
+    #[error("IO error: {0}")]
+    IOError(#[from] std::io::Error),
 }

@@ -50,5 +50,9 @@ pub struct Config {
 
     /// Proxy configuration for the asynchronous client
     #[builder(default, setter(strip_option))]
-    pub proxy_config: Option<ProxyConfig>
+    pub proxy_config: Option<ProxyConfig>,
+
+    /// Use zstd compression
+    #[builder(default=true)]
+    pub zstd: bool,
 }

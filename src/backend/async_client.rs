@@ -75,7 +75,14 @@ impl<'a> Request for ReqwestRequest<'a> {
 			}
 
 			if self.endpoint.need_body {
-				req = req.body(self.body.clone());
+				req = if self.client.config.zstd {
+					req = req.header("Content-Encoding", "zstd");
+					req = req.header("Compression", "zstd");
+					req.body(reqwest::Body::from(zstd::encode_all(self.body.as_ref(), 0)?))
+				}
+				else {
+					req.body(self.body.clone())
+				};
 			}
 			let req = req.timeout(Duration::from_secs_f64(self.client.config.timeout));
 			let req = req.build()?;
