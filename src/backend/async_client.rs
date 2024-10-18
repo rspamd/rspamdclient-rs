@@ -60,23 +60,39 @@ impl<'a> Request for ReqwestRequest<'a> {
 	type HeaderMap = reqwest::header::HeaderMap;
 
 	async fn response(&self) -> Result<Self::Response, RspamdError> {
-		let method = if self.endpoint.need_body {  reqwest::Method::POST } else { reqwest::Method::GET };
+		let mut retry_cnt = self.client.config.retries;
 
-		let mut url = Url::from_str(self.client.config.base_url.as_str())
-			.map_err(|e| RspamdError::HttpError(e.to_string()))?;
-		url.set_path(self.endpoint.url);
-		let mut req = self.client.inner.request(method, url);
+		let response = loop {
+			let method = if self.endpoint.need_body {  reqwest::Method::POST } else { reqwest::Method::GET };
 
-		if let Some(ref password) = self.client.config.password {
-			req = req.header("Password", password);
-		}
+			let mut url = Url::from_str(self.client.config.base_url.as_str())
+				.map_err(|e| RspamdError::HttpError(e.to_string()))?;
+			url.set_path(self.endpoint.url);
+			let mut req = self.client.inner.request(method, url);
 
-		if self.endpoint.need_body {
-			req = req.body(self.body.clone());
-		}
-		let req = req.build()?;
-		let response = self.client.inner.execute(req).await
-			.map_err(|e| RspamdError::HttpError(e.to_string()))?;
+			if let Some(ref password) = self.client.config.password {
+				req = req.header("Password", password);
+			}
+
+			if self.endpoint.need_body {
+				req = req.body(self.body.clone());
+			}
+			let req = req.timeout(Duration::from_secs_f64(self.client.config.timeout));
+			let req = req.build()?;
+
+			match self.client.inner.execute(req).await {
+				Ok(v) => break Ok(v),
+				Err(e) => {
+					if (retry_cnt - 1) == 0 {
+						break Err(e);
+					}
+					retry_cnt -= 1;
+					let delay = Duration::from_secs_f64(self.client.config.timeout);
+					tokio::time::sleep(delay).await;
+					continue;
+				}
+			}
+		}.map_err(|e| RspamdError::HttpError(e.to_string()))?;
 
 		if !response.status().is_success() {
 			return Err(RspamdError::HttpError(format!(

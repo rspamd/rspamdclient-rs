@@ -40,6 +40,9 @@ pub struct Config {
     #[builder(default=30.0)]
     pub timeout: f64,
 
+    /// Number of retries for requests
+    #[builder(default=1)]
+    pub retries: u32,
 
     /// Custom TLS settings for the asynchronous client
     #[builder(default, setter(strip_option))]
