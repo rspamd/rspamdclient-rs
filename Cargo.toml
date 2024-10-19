@@ -2,6 +2,13 @@
 name = "rspamd-client"
 version = "0.1.0"
 edition = "2021"
+license-file = "LICENSE.md"
+homepage = "https://rspamd.com"
+repository = "https://github.com/rspamd/rspamdclient-rs"
+description = "Rspamd client API"
+readme = "README.md"
+categories = ["email"]
+keywords = ["rspamd", "http"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
