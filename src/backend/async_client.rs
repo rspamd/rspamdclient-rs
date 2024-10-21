@@ -159,6 +159,25 @@ impl<'a> ReqwestRequest<'a> {
 	}
 }
 
+/// Scan an email asynchronously, returning the parsed reply or error.
+/// Example:
+/// ```rust
+/// use rspamd_client::config::Config;
+/// use rspamd_client::scan_async;
+/// use rspamd_client::error::RspamdError;
+/// use bytes::Bytes;
+/// use std::str::FromStr;
+///
+///	#[tokio::main]
+/// async fn main() -> Result<(), RspamdError> {
+/// 	let config = Config::builder()
+/// 		.base_url("http://localhost:11333".to_string())
+/// 		.build();
+/// 	let email = "...";
+/// 	let response = scan_async(&config, email).await?;
+/// 	Ok(())
+/// }
+/// ```
 #[maybe_async::maybe_async]
 pub async fn scan_async<T: Into<Bytes>>(options: &Config, body: T) -> Result<RspamdScanReply, RspamdError> {
 	let client = async_client(options)?;

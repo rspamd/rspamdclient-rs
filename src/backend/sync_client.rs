@@ -153,6 +153,22 @@ impl<'a> AttoRequest<'a> {
 	}
 }
 
+/// Synchronously scan an email
+/// Example:
+/// ```rust
+/// use rspamd_client::config::Config;
+/// use rspamd_client::scan_sync;
+/// use rspamd_client::error::RspamdError;
+///
+/// fn main() -> Result<(), RspamdError>{
+///   let config = Config::builder()
+///             .base_url("http://localhost:11333".to_string())
+///              .build();
+///    let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
+///    let response = scan_sync(&config, email)?;
+///    Ok(())
+/// }
+///
 pub fn scan_sync<T: Into<Bytes>>(options: &Config, body: T) -> Result<RspamdScanReply, RspamdError> {
 	let client = sync_client(options)?;
 	let request = AttoRequest::new(client, body, RspamdCommand::Scan)?;
