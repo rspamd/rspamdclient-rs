@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::error::RspamdError;
 use crate::protocol::commands::{RspamdCommand, RspamdEndpoint};
 use crate::protocol::RspamdScanReply;
+use crate::protocol::encryption::httpcrypt_encrypt;
 
 pub struct AsyncClient<'a> {
 	config: &'a Config,
@@ -70,7 +71,7 @@ impl<'a> Request for ReqwestRequest<'a> {
 			let mut url = Url::from_str(self.client.config.base_url.as_str())
 				.map_err(|e| RspamdError::HttpError(e.to_string()))?;
 			url.set_path(self.endpoint.url);
-			let mut req = self.client.inner.request(method, url);
+			let mut req = self.client.inner.request(method, url.clone());
 
 			if let Some(ref password) = self.client.config.password {
 				req = req.header("Password", password);
@@ -89,6 +90,20 @@ impl<'a> Request for ReqwestRequest<'a> {
 					req.body(self.body.clone())
 				};
 			}
+
+			if let Some(ref encryption_key) = self.client.config.encryption_key {
+				let inner_req = req.build().map_err(|e| RspamdError::HttpError(e.to_string()))?;
+				let encrypted = httpcrypt_encrypt(
+					url.as_str(),
+					&self.body.as_ref(),
+					inner_req.headers(),
+					encryption_key.as_bytes(),
+				)?;
+				req = self.client.inner.request(reqwest::Method::POST, url);
+				req = req.header("Key", encrypted.peer_key);
+				req = req.body(encrypted.body);
+			}
+
 			let req = req.timeout(Duration::from_secs_f64(self.client.config.timeout));
 			let req = req.build().map_err(|e| RspamdError::HttpError(e.to_string()))?;
 

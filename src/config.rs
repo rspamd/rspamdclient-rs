@@ -55,4 +55,8 @@ pub struct Config {
     /// Use zstd compression
     #[builder(default=true)]
     pub zstd: bool,
+
+    /// Encryption key for the asynchronous client
+    #[builder(default, setter(strip_option))]
+    pub encryption_key: Option<String>,
 }

@@ -19,4 +19,7 @@ pub enum RspamdError {
 
     #[error("URL parsing error: {0}")]
     ParseError(#[from] url::ParseError),
+
+    #[error("Encrypption error: {0}")]
+    EncryptionError(String),
 }

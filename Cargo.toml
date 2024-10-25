@@ -1,8 +1,8 @@
 [package]
 name = "rspamd-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-license-file = "LICENSE.md"
+license = "Apache-2.0"
 homepage = "https://rspamd.com"
 repository = "https://github.com/rspamd/rspamdclient-rs"
 description = "Rspamd client API"
@@ -28,6 +28,8 @@ futures = "0.3.31"
 attohttpc = { version = "0.28", optional = true }
 native-tls = "0.2"
 url = "2.5"
+crypto_box = { version = "0.9", default-features = false, features = ["chacha20", "alloc", "getrandom"] }
+rspamd-base32 = "0.1"
 
 [features]
 default = ["async"]
