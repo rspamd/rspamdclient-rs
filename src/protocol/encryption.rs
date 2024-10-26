@@ -1,7 +1,25 @@
 use crypto_box::{SecretKey, aead::{OsRng, AeadCore}, ChaChaBox};
 use crypto_box::aead::AeadInPlace;
 use crate::error::RspamdError;
-use rspamd_base32::decode;
+use rspamd_base32::{decode, encode};
+use blake2b_simd::blake2b;
+use chacha20::hchacha;
+use chacha20::cipher::zeroize::Zeroizing;
+use crypto_box::aead::generic_array::arr;
+use crypto_secretbox::{XChaCha20Poly1305, KeyInit, Tag};
+use crypto_secretbox::consts::U20;
+use curve25519_dalek::Scalar;
+
+/// It must be the same as Rspamd one, that is currently 5
+const SHORT_KEY_ID_SIZE : usize = 5;
+
+pub fn make_key_header(remote_pk: &str, local_pk: &str) -> Result<String, RspamdError> {
+	let remote_pk = decode(remote_pk)
+		.map_err(|_| RspamdError::EncryptionError("Base32 decode failed".to_string()))?;
+	let hash = blake2b(remote_pk.as_slice());
+	let hash_b32 = encode(&hash.as_bytes()[0..SHORT_KEY_ID_SIZE]);
+	Ok(format!("{}={}", hash_b32.as_str(), local_pk))
+}
 
 /// Encrypt a plaintext with a given peer public key generating an ephemeral keypair.
 fn encrypt_inplace(
@@ -16,13 +34,24 @@ fn encrypt_inplace(
 		.map_err(|_| RspamdError::EncryptionError("Base32 decode failed".to_string()))?;
 	let remote_pk = crypto_box::PublicKey::from_slice(&remote_pk)
 		.map_err(|_| RspamdError::EncryptionError("Public key is invalid".to_string()))?;
-	let cbox = ChaChaBox::new(&remote_pk, &local_sk);
+
+	// Do manual scalarmult as Rspamd is using it's own way there
+	let n0 = arr![u8; 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,];
+	let mut nm = Zeroizing::new(local_sk.to_scalar() * Scalar::from_bytes_mod_order(*remote_pk.as_bytes())).to_bytes();
+	nm[0] &= 248u8;
+	nm[31] &= 127u8;
+	nm[31] |= 64u8;
+	let nm = Zeroizing::new(hchacha::<U20>(&nm.into(), &n0));
+	let cbox = XChaCha20Poly1305::new(nm.as_slice().into());
 	let nonce = ChaChaBox::generate_nonce(&mut OsRng);
 	dest.extend_from_slice(nonce.as_slice());
+	// Make room in the buffer for the tag. It needs to be prepended.
+	dest.extend_from_slice(Tag::default().as_slice());
+	let offset = dest.len();
 	dest.extend_from_slice(plaintext);
-	let mac = cbox.encrypt_in_place_detached(&nonce, &[], &mut dest.as_mut_slice()[nonce.len()..])
+	let tag = cbox.encrypt_in_place_detached(&nonce, &[], &mut dest.as_mut_slice()[offset..])
 		.map_err(|_| RspamdError::EncryptionError("Cannot encrypt".to_string()))?;
-	dest.extend_from_slice(mac.as_slice());
+	<Vec<u8> as AsMut<Vec<u8>>>::as_mut(&mut dest)[nonce.len()..XChaCha20Poly1305::TAG_SIZE].copy_from_slice(tag.as_slice());
 	Ok(dest)
 }
 
@@ -54,7 +83,7 @@ where T: IntoIterator<Item = (HN, HV)>,
 	dest.push(b'\n');
 	dest.extend_from_slice(body.as_ref());
 
-	dest = encrypt_inplace(&dest.as_slice(), peer_key, &local_sk)?;
+	dest = encrypt_inplace(dest.as_slice(), peer_key, &local_sk)?;
 
 	Ok(HTTPCryptEncrypted {
 		body: dest.clone(),

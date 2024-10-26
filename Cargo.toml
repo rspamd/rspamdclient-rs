@@ -30,6 +30,10 @@ native-tls = "0.2"
 url = "2.5"
 crypto_box = { version = "0.9", default-features = false, features = ["chacha20", "alloc", "getrandom"] }
 rspamd-base32 = "0.1"
+blake2b_simd = "1.0"
+chacha20 = "0.9"
+crypto_secretbox = { version = "0.1", default-features = false, features = ["chacha20"] }
+curve25519-dalek = "4.1"
 
 [features]
 default = ["async"]

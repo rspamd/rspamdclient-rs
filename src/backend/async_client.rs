@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::error::RspamdError;
 use crate::protocol::commands::{RspamdCommand, RspamdEndpoint};
 use crate::protocol::RspamdScanReply;
-use crate::protocol::encryption::httpcrypt_encrypt;
+use crate::protocol::encryption::{httpcrypt_encrypt, make_key_header};
 
 pub struct AsyncClient<'a> {
 	config: &'a Config,
@@ -95,12 +95,13 @@ impl<'a> Request for ReqwestRequest<'a> {
 				let inner_req = req.build().map_err(|e| RspamdError::HttpError(e.to_string()))?;
 				let encrypted = httpcrypt_encrypt(
 					url.as_str(),
-					&self.body.as_ref(),
+					self.body.as_ref(),
 					inner_req.headers(),
 					encryption_key.as_bytes(),
 				)?;
 				req = self.client.inner.request(reqwest::Method::POST, url);
-				req = req.header("Key", encrypted.peer_key);
+				let key_header = make_key_header(encryption_key.as_str(), encrypted.peer_key.as_str())?;
+				req = req.header("Key", key_header);
 				req = req.body(encrypted.body);
 			}
 
