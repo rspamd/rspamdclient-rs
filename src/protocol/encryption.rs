@@ -26,10 +26,10 @@ fn encrypt_inplace(
 	plaintext: &[u8],
 	recipient_public_key: &[u8],
 	local_sk: &SecretKey,
-) -> Result<Vec<u8>, RspamdError> {
+) -> Result<(Vec<u8>, XChaCha20Poly1305), RspamdError> {
 	let mut dest = Vec::with_capacity(plaintext.len() +
-		std::mem::size_of::<<ChaChaBox as AeadCore>::NonceSize>() +
-		std::mem::size_of::<<ChaChaBox as AeadCore>::TagSize>());
+		XChaCha20Poly1305::NONCE_SIZE +
+		XChaCha20Poly1305::TAG_SIZE);
 	let remote_pk = decode(recipient_public_key)
 		.map_err(|_| RspamdError::EncryptionError("Base32 decode failed".to_string()))?;
 	let remote_pk = crypto_box::PublicKey::from_slice(&remote_pk)
@@ -52,12 +52,13 @@ fn encrypt_inplace(
 	let tag = cbox.encrypt_in_place_detached(&nonce, &[], &mut dest.as_mut_slice()[offset..])
 		.map_err(|_| RspamdError::EncryptionError("Cannot encrypt".to_string()))?;
 	<Vec<u8> as AsMut<Vec<u8>>>::as_mut(&mut dest)[nonce.len()..XChaCha20Poly1305::TAG_SIZE].copy_from_slice(tag.as_slice());
-	Ok(dest)
+	Ok((dest, cbox))
 }
 
 pub struct HTTPCryptEncrypted {
 	pub body: Vec<u8>,
 	pub peer_key: String, // Encoded as base32
+	pub secretbox: XChaCha20Poly1305,
 }
 
 pub fn httpcrypt_encrypt<T, HN, HV>(url: &str, body: &[u8], headers: T, peer_key: &[u8]) -> Result<HTTPCryptEncrypted, RspamdError>
@@ -83,10 +84,11 @@ where T: IntoIterator<Item = (HN, HV)>,
 	dest.push(b'\n');
 	dest.extend_from_slice(body.as_ref());
 
-	dest = encrypt_inplace(dest.as_slice(), peer_key, &local_sk)?;
+	let (dest, sbox) = encrypt_inplace(dest.as_slice(), peer_key, &local_sk)?;
 
 	Ok(HTTPCryptEncrypted {
 		body: dest.clone(),
 		peer_key: rspamd_base32::encode(local_pk.as_ref()),
+		secretbox: sbox,
 	})
 }
