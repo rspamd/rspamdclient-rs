@@ -1097,6 +1097,7 @@ dependencies = [
  "crypto_secretbox",
  "curve25519-dalek",
  "futures",
+ "httparse",
  "maybe-async",
  "native-tls",
  "reqwest",

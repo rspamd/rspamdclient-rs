@@ -20,6 +20,21 @@ pub enum RspamdError {
     #[error("URL parsing error: {0}")]
     ParseError(#[from] url::ParseError),
 
-    #[error("Encrypption error: {0}")]
+    #[error("Encryption error: {0}")]
     EncryptionError(String),
+
+    #[error("UTF8 process error: {0}")]
+    UTF8Error(#[from] std::str::Utf8Error),
+
+    #[cfg(feature = "async")]
+    #[error("Invalid HTTP header value: {0}")]
+    InvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
+
+    #[cfg(feature = "async")]
+    #[error("Invalid HTTP header name: {0}")]
+    InvalidHeaderName(#[from] reqwest::header::InvalidHeaderName),
+
+    #[cfg(feature = "async")]
+    #[error("HTTP reqwest error: {0}")]
+    ReqwestError(#[from] reqwest::Error),
 }

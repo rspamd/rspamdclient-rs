@@ -1,16 +1,15 @@
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 use bytes::Bytes;
 use reqwest::Client;
+use reqwest::header::{HeaderName, HeaderValue};
 use url::Url;
-
 use crate::backend::traits::*;
 use crate::config::Config;
 use crate::error::RspamdError;
 use crate::protocol::commands::{RspamdCommand, RspamdEndpoint};
 use crate::protocol::RspamdScanReply;
-use crate::protocol::encryption::{httpcrypt_encrypt, make_key_header};
+use crate::protocol::encryption::{httpcrypt_encrypt, httpcrypt_decrypt, make_key_header};
 
 pub struct AsyncClient<'a> {
 	config: &'a Config,
@@ -59,11 +58,12 @@ pub struct ReqwestRequest<'a> {
 
 #[maybe_async::maybe_async]
 impl<'a> Request for ReqwestRequest<'a> {
-	type Response = reqwest::Response;
+	type Body = Bytes;
 	type HeaderMap = reqwest::header::HeaderMap;
 
-	async fn response(&self) -> Result<Self::Response, RspamdError> {
+	async fn response(&self) -> Result<(Self::HeaderMap, Self::Body), RspamdError> {
 		let mut retry_cnt = self.client.config.retries;
+		let mut maybe_secretbox = Default::default();
 
 		let response = loop {
 			let method = if self.endpoint.need_body {  reqwest::Method::POST } else { reqwest::Method::GET };
@@ -103,6 +103,7 @@ impl<'a> Request for ReqwestRequest<'a> {
 				let key_header = make_key_header(encryption_key.as_str(), encrypted.peer_key.as_str())?;
 				req = req.header("Key", key_header);
 				req = req.body(encrypted.body);
+				maybe_secretbox = Some(encrypted.secretbox);
 			}
 
 			let req = req.timeout(Duration::from_secs_f64(self.client.config.timeout));
@@ -119,7 +120,7 @@ impl<'a> Request for ReqwestRequest<'a> {
 					tokio::time::sleep(delay).await;
 					continue;
 				}
-			}
+			};
 		}.map_err(|e| RspamdError::HttpError(e.to_string()))?;
 
 		if !response.status().is_success() {
@@ -129,34 +130,23 @@ impl<'a> Request for ReqwestRequest<'a> {
 			)));
 		}
 
-		Ok(response)
-	}
+		if let Some(secretbox) = maybe_secretbox {
+			let body = response.bytes().await.map_err(|e| RspamdError::HttpError(e.to_string()))?;
+			let decrypted = httpcrypt_decrypt(body.as_ref(), &secretbox)?;
 
-	async fn response_data(&self) -> Result<ResponseData, RspamdError> {
-		let response = self.response().await?;
-		let status_code = response.status().as_u16();
-		let headers = response.headers().clone();
-		let response_headers = headers
-			.clone()
-			.iter()
-			.map(|(k, v)| {
-				(
-					k.to_string(),
-					v.to_str()
-						.unwrap_or("could-not-decode-header-value")
-						.to_string(),
-				)
-			})
-			.collect::<HashMap<String, String>>();
-		let body_vec = response.bytes().await.map_err(|e| RspamdError::HttpError(e.to_string()))?;
-		Ok(ResponseData::new(body_vec, status_code, response_headers))
-	}
-
-	async fn response_header(&self) -> Result<(Self::HeaderMap, u16), RspamdError> {
-		let response = self.response().await?;
-		let status_code = response.status().as_u16();
-		let headers = response.headers().clone();
-		Ok((headers, status_code))
+			let mut hdrs = [httparse::EMPTY_HEADER; 64];
+			let mut parsed = httparse::Response::new(&mut hdrs);
+			let body_offset = parsed.parse(decrypted.as_slice()).map_err(|s| RspamdError::HttpError(s.to_string()))?;
+			let mut output_hdrs = reqwest::header::HeaderMap::with_capacity(hdrs.len());
+			for hdr in hdrs.into_iter() {
+				output_hdrs.insert(HeaderName::from_str(hdr.name)?, HeaderValue::from_str(std::str::from_utf8(hdr.value)?)?);
+			}
+			let body = decrypted.as_slice()[body_offset.unwrap()..].to_vec();
+			Ok((output_hdrs, body.into()))
+		}
+		else {
+			Ok((response.headers().clone(), response.bytes().await?))
+		}
 	}
 }
 
@@ -198,8 +188,7 @@ impl<'a> ReqwestRequest<'a> {
 pub async fn scan_async<T: Into<Bytes>>(options: &Config, body: T) -> Result<RspamdScanReply, RspamdError> {
 	let client = async_client(options)?;
 	let request = ReqwestRequest::new(client, body, RspamdCommand::Scan).await?;
-	let response = request.response().await.map_err(|e| RspamdError::HttpError(e.to_string()))?;
-	let response = response.text().await.map_err(|e| RspamdError::HttpError(e.to_string()))?;
-	let response = serde_json::from_str::<RspamdScanReply>(&response)?;
+	let (_, body) = request.response().await.map_err(|e| RspamdError::HttpError(e.to_string()))?;
+	let response = serde_json::from_slice::<RspamdScanReply>(body.as_ref())?;
 	Ok(response)
 }
