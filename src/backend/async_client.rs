@@ -1,9 +1,10 @@
 use std::str::FromStr;
 use std::time::Duration;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use reqwest::Client;
 use reqwest::header::{HeaderName, HeaderValue};
 use url::Url;
+use zstd::zstd_safe::WriteBuf;
 use crate::backend::traits::*;
 use crate::config::Config;
 use crate::error::RspamdError;
@@ -63,7 +64,7 @@ impl<'a> Request for ReqwestRequest<'a> {
 
 	async fn response(&self) -> Result<(Self::HeaderMap, Self::Body), RspamdError> {
 		let mut retry_cnt = self.client.config.retries;
-		let mut maybe_secretbox = Default::default();
+		let mut maybe_sk = Default::default();
 
 		let response = loop {
 			let method = if self.endpoint.need_body {  reqwest::Method::POST } else { reqwest::Method::GET };
@@ -82,20 +83,17 @@ impl<'a> Request for ReqwestRequest<'a> {
 				req = req.header("Compression", "zstd");
 			}
 
-			if self.endpoint.need_body {
-				req = if self.client.config.zstd {
-					req.body(reqwest::Body::from(zstd::encode_all(self.body.as_ref(), 0)?))
-				}
-				else {
-					req.body(self.body.clone())
-				};
-			}
-
 			if let Some(ref encryption_key) = self.client.config.encryption_key {
 				let inner_req = req.build().map_err(|e| RspamdError::HttpError(e.to_string()))?;
+				let body = if self.client.config.zstd {
+					zstd::encode_all(self.body.as_ref(), 0)?
+				}
+				else {
+					self.body.to_vec()
+				};
 				let encrypted = httpcrypt_encrypt(
-					url.as_str(),
-					self.body.as_ref(),
+					url.path(),
+					body.as_slice(),
 					inner_req.headers(),
 					encryption_key.as_bytes(),
 				)?;
@@ -103,7 +101,17 @@ impl<'a> Request for ReqwestRequest<'a> {
 				let key_header = make_key_header(encryption_key.as_str(), encrypted.peer_key.as_str())?;
 				req = req.header("Key", key_header);
 				req = req.body(encrypted.body);
-				maybe_secretbox = Some(encrypted.secretbox);
+				maybe_sk = Some(encrypted.shared_key);
+			}
+			else {
+				if self.endpoint.need_body {
+					req = if self.client.config.zstd {
+						req.body(reqwest::Body::from(zstd::encode_all(self.body.as_ref(), 0)?))
+					}
+					else {
+						req.body(self.body.clone())
+					};
+				}
 			}
 
 			let req = req.timeout(Duration::from_secs_f64(self.client.config.timeout));
@@ -130,18 +138,18 @@ impl<'a> Request for ReqwestRequest<'a> {
 			)));
 		}
 
-		if let Some(secretbox) = maybe_secretbox {
-			let body = response.bytes().await.map_err(|e| RspamdError::HttpError(e.to_string()))?;
-			let decrypted = httpcrypt_decrypt(body.as_ref(), &secretbox)?;
+		if let Some(sk) = maybe_sk {
+			let mut body = BytesMut::from(response.bytes().await.map_err(|e| RspamdError::HttpError(e.to_string()))?);
+			let decrypted_offset = httpcrypt_decrypt(body.as_mut(), sk)?;
 
 			let mut hdrs = [httparse::EMPTY_HEADER; 64];
 			let mut parsed = httparse::Response::new(&mut hdrs);
-			let body_offset = parsed.parse(decrypted.as_slice()).map_err(|s| RspamdError::HttpError(s.to_string()))?;
+			let body_offset = parsed.parse(&body.as_slice()[decrypted_offset..]).map_err(|s| RspamdError::HttpError(s.to_string()))?;
 			let mut output_hdrs = reqwest::header::HeaderMap::with_capacity(hdrs.len());
 			for hdr in hdrs.into_iter() {
 				output_hdrs.insert(HeaderName::from_str(hdr.name)?, HeaderValue::from_str(std::str::from_utf8(hdr.value)?)?);
 			}
-			let body = decrypted.as_slice()[body_offset.unwrap()..].to_vec();
+			let body = body.as_slice()[body_offset.unwrap() + decrypted_offset..].to_vec();
 			Ok((output_hdrs, body.into()))
 		}
 		else {

@@ -1,19 +1,66 @@
 use crypto_box::{SecretKey, aead::{OsRng, AeadCore}, ChaChaBox};
-use crypto_box::aead::AeadInPlace;
 use crate::error::RspamdError;
 use rspamd_base32::{decode, encode};
 use blake2b_simd::blake2b;
-use chacha20::cipher::consts::U10;
-use chacha20::hchacha;
-use chacha20::cipher::zeroize::Zeroizing;
+use chacha20::{cipher::consts::U10, hchacha, cipher::zeroize::Zeroizing, XChaCha20};
+use chacha20::cipher::consts::U64;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
+use poly1305::{Poly1305, Tag};
 use crypto_box::aead::generic_array::{arr, GenericArray, typenum::U32};
-use crypto_secretbox::{XChaCha20Poly1305, KeyInit, Tag};
-use crypto_secretbox::aead::Aead;
 use curve25519_dalek::{MontgomeryPoint, Scalar};
 use curve25519_dalek::scalar::clamp_integer;
+use poly1305::universal_hash::{KeyInit};
 
 /// It must be the same as Rspamd one, that is currently 5
 const SHORT_KEY_ID_SIZE : usize = 5;
+
+pub(crate) type RspamdNM = Zeroizing<GenericArray<u8, U32>>;
+
+pub struct RspamdSecretbox {
+	enc_ctx: XChaCha20,
+	mac_ctx: Poly1305,
+}
+
+pub struct HTTPCryptEncrypted {
+	pub body: Vec<u8>,
+	pub peer_key: String, // Encoded as base32
+	pub shared_key: RspamdNM,
+}
+
+impl RspamdSecretbox {
+	/// Construct new secretbox following Rspamd conventions
+	pub fn new(key: RspamdNM, nonce: chacha20::XNonce) -> Self {
+		// Rspamd does it in a different way, doing full chacha20 round on the extended mac key
+		let mut chacha = XChaCha20::new_from_slices(key.as_slice(),
+													nonce.as_slice()).unwrap();
+		let mut mac_key : GenericArray<u8, U64> = GenericArray::default();
+		chacha.apply_keystream(mac_key.as_mut());
+		let poly = Poly1305::new_from_slice(mac_key.split_at(32).0).unwrap();
+		RspamdSecretbox {
+			enc_ctx: chacha,
+			mac_ctx: poly,
+		}
+	}
+
+	/// Encrypts data in place and returns a tag
+	pub fn encrypt_in_place(mut self, data: &mut [u8]) -> Tag {
+		// Encrypt-then-mac
+		self.enc_ctx.apply_keystream(data);
+		let tag = self.mac_ctx.compute_unpadded(data);
+		tag
+	}
+
+	/// Decrypts in place if auth tag is correct
+	pub fn decrypt_in_place(&mut self, data: &mut [u8], tag: &Tag) -> Result<usize, RspamdError> {
+		let computed = self.mac_ctx.clone().compute_unpadded(data);
+		if computed != *tag {
+			return Err(RspamdError::EncryptionError("Authentication failed".to_string()));
+		}
+		self.enc_ctx.apply_keystream(&mut data[computed.len()..]);
+
+		Ok(computed.len())
+	}
+}
 
 pub fn make_key_header(remote_pk: &str, local_pk: &str) -> Result<String, RspamdError> {
 	let remote_pk = decode(remote_pk)
@@ -25,7 +72,7 @@ pub fn make_key_header(remote_pk: &str, local_pk: &str) -> Result<String, Rspamd
 
 /// Perform a scalar multiplication with a remote public key and a local secret key.
 pub(crate) fn rspamd_x25519_scalarmult(remote_pk: &[u8], local_sk: &SecretKey) -> Result<Zeroizing<MontgomeryPoint>, RspamdError> {
-	let remote_pk: [u8; XChaCha20Poly1305::KEY_SIZE] = decode(remote_pk)
+	let remote_pk: [u8; 32] = decode(remote_pk)
 		.map_err(|_| RspamdError::EncryptionError("Base32 decode failed".to_string()))?
 		.as_slice().try_into().unwrap();
 	// Do manual scalarmult as Rspamd is using it's own way there
@@ -46,32 +93,26 @@ fn encrypt_inplace(
 	plaintext: &[u8],
 	recipient_public_key: &[u8],
 	local_sk: &SecretKey,
-) -> Result<(Vec<u8>, XChaCha20Poly1305), RspamdError> {
+) -> Result<(Vec<u8>, RspamdNM), RspamdError> {
 	let mut dest = Vec::with_capacity(plaintext.len() +
-		XChaCha20Poly1305::NONCE_SIZE +
-		XChaCha20Poly1305::TAG_SIZE);
+		24 +
+		poly1305::BLOCK_SIZE);
 	let ec_point = rspamd_x25519_scalarmult(recipient_public_key, local_sk)?;
 	let nm = rspamd_x25519_ecdh(ec_point);
-	let cbox = XChaCha20Poly1305::new(nm.as_slice().into());
+
 	let nonce = ChaChaBox::generate_nonce(&mut OsRng);
+	let cbox = RspamdSecretbox::new(nm.clone(), nonce);
 	dest.extend_from_slice(nonce.as_slice());
 	// Make room in the buffer for the tag. It needs to be prepended.
 	dest.extend_from_slice(Tag::default().as_slice());
 	let offset = dest.len();
 	dest.extend_from_slice(plaintext);
-	let nm_slice = nm.as_slice();
-	let tag = cbox.encrypt_in_place_detached(&nonce, &[], &mut dest.as_mut_slice()[offset..])
-		.map_err(|_| RspamdError::EncryptionError("Cannot encrypt".to_string()))?;
-	let tag_dest = &mut <Vec<u8> as AsMut<Vec<u8>>>::as_mut(&mut dest)[nonce.len()..(nonce.len() + XChaCha20Poly1305::TAG_SIZE)];
+	let tag = cbox.encrypt_in_place(&mut dest.as_mut_slice()[offset..]);
+	let tag_dest = &mut <Vec<u8> as AsMut<Vec<u8>>>::as_mut(&mut dest)[nonce.len()..(nonce.len() + poly1305::BLOCK_SIZE)];
 	tag_dest.copy_from_slice(tag.as_slice());
-	Ok((dest, cbox))
+	Ok((dest, nm))
 }
 
-pub struct HTTPCryptEncrypted {
-	pub body: Vec<u8>,
-	pub peer_key: String, // Encoded as base32
-	pub secretbox: XChaCha20Poly1305,
-}
 
 pub fn httpcrypt_encrypt<T, HN, HV>(url: &str, body: &[u8], headers: T, peer_key: &[u8]) -> Result<HTTPCryptEncrypted, RspamdError>
 where T: IntoIterator<Item = (HN, HV)>,
@@ -89,27 +130,29 @@ where T: IntoIterator<Item = (HN, HV)>,
 	dest.extend_from_slice(b" HTTP/1.1\n");
 	for (k, v) in headers {
 		dest.extend_from_slice(k.as_ref());
-		dest.push(b':');
+		dest.extend_from_slice(b": ");
 		dest.extend_from_slice(v.as_ref());
 		dest.push(b'\n');
 	}
-	dest.push(b'\n');
+	dest.extend_from_slice(format!("Content-Length: {}\n\n", body.len()).as_bytes());
 	dest.extend_from_slice(body.as_ref());
 
-	let (dest, sbox) = encrypt_inplace(dest.as_slice(), peer_key, &local_sk)?;
+	let (encrypted, nm) = encrypt_inplace(dest.as_slice(), peer_key, &local_sk)?;
 
 	Ok(HTTPCryptEncrypted {
-		body: dest,
+		body: encrypted,
 		peer_key: rspamd_base32::encode(local_pk.as_ref()),
-		secretbox: sbox,
+		shared_key: nm,
 	})
 }
 
 /// Decrypts body using HTTPCrypt algorithm
-pub fn httpcrypt_decrypt(body: &[u8], secret_box: &XChaCha20Poly1305) -> Result<Vec<u8>, RspamdError> {
-	let nonce = &body[0..XChaCha20Poly1305::NONCE_SIZE];
-	secret_box.decrypt(nonce.into(), &body[XChaCha20Poly1305::NONCE_SIZE..])
-		.map_err(|_| RspamdError::EncryptionError("Cannot decrypt".to_string()))
+pub fn httpcrypt_decrypt(body: &mut [u8], nm: RspamdNM) -> Result<usize, RspamdError> {
+	let (nonce, remain) = body.split_at_mut(24);
+	let (body, tag) = remain.split_at_mut(24 + poly1305::BLOCK_SIZE);
+	let tag = Tag::from_slice(tag);
+	let mut sbox = RspamdSecretbox::new(nm, *chacha20::XNonce::from_slice(nonce));
+	sbox.decrypt_in_place(body, &tag)
 }
 
 #[cfg(test)]

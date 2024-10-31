@@ -1100,6 +1100,7 @@ dependencies = [
  "httparse",
  "maybe-async",
  "native-tls",
+ "poly1305",
  "reqwest",
  "rspamd-base32",
  "serde",
