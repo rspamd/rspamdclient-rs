@@ -145,11 +145,16 @@ impl<'a> Request for ReqwestRequest<'a> {
 			let mut parsed = httparse::Response::new(&mut hdrs);
 
 			let body_offset = parsed.parse(&body.as_slice()[decrypted_offset..]).map_err(|s| RspamdError::HttpError(s.to_string()))?;
-			let mut output_hdrs = reqwest::header::HeaderMap::with_capacity(hdrs.len());
-			for hdr in hdrs.into_iter() {
+			let mut output_hdrs = reqwest::header::HeaderMap::with_capacity(parsed.headers.len());
+			for hdr in parsed.headers.into_iter() {
 				output_hdrs.insert(HeaderName::from_str(hdr.name)?, HeaderValue::from_str(std::str::from_utf8(hdr.value)?)?);
 			}
-			let body = body.as_slice()[body_offset.unwrap() + decrypted_offset..].to_vec();
+			let body = if output_hdrs.get("Compression").map_or(false,
+																		|hv| hv == "zstd") {
+				zstd::decode_all(&body.as_slice()[body_offset.unwrap() + decrypted_offset..])?
+			} else {
+				body.as_slice()[body_offset.unwrap() + decrypted_offset..].to_vec()
+			};
 			Ok((output_hdrs, body.into()))
 		}
 		else {
