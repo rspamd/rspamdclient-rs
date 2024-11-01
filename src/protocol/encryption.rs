@@ -56,7 +56,7 @@ impl RspamdSecretbox {
 		if computed != *tag {
 			return Err(RspamdError::EncryptionError("Authentication failed".to_string()));
 		}
-		self.enc_ctx.apply_keystream(&mut data[computed.len()..]);
+		self.enc_ctx.apply_keystream(&mut data[..]);
 
 		Ok(computed.len())
 	}
@@ -148,11 +148,17 @@ where T: IntoIterator<Item = (HN, HV)>,
 
 /// Decrypts body using HTTPCrypt algorithm
 pub fn httpcrypt_decrypt(body: &mut [u8], nm: RspamdNM) -> Result<usize, RspamdError> {
+	if body.len() < 24 + poly1305::BLOCK_SIZE {
+		return Err(RspamdError::EncryptionError("Invalid body size".to_string()));
+	}
+
 	let (nonce, remain) = body.split_at_mut(24);
-	let (body, tag) = remain.split_at_mut(24 + poly1305::BLOCK_SIZE);
+	let (tag, decrypted_dest) = remain.split_at_mut(poly1305::BLOCK_SIZE);
 	let tag = Tag::from_slice(tag);
+	let mut offset = nonce.len();
 	let mut sbox = RspamdSecretbox::new(nm, *chacha20::XNonce::from_slice(nonce));
-	sbox.decrypt_in_place(body, &tag)
+	offset += sbox.decrypt_in_place(decrypted_dest, &tag)?;
+	Ok(offset)
 }
 
 #[cfg(test)]

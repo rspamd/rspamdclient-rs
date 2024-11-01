@@ -141,9 +141,9 @@ impl<'a> Request for ReqwestRequest<'a> {
 		if let Some(sk) = maybe_sk {
 			let mut body = BytesMut::from(response.bytes().await.map_err(|e| RspamdError::HttpError(e.to_string()))?);
 			let decrypted_offset = httpcrypt_decrypt(body.as_mut(), sk)?;
-
 			let mut hdrs = [httparse::EMPTY_HEADER; 64];
 			let mut parsed = httparse::Response::new(&mut hdrs);
+
 			let body_offset = parsed.parse(&body.as_slice()[decrypted_offset..]).map_err(|s| RspamdError::HttpError(s.to_string()))?;
 			let mut output_hdrs = reqwest::header::HeaderMap::with_capacity(hdrs.len());
 			for hdr in hdrs.into_iter() {
