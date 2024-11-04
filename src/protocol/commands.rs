@@ -1,3 +1,4 @@
+//! Commands that can be sent to the server
 
 /// Commands that can be sent to the server
 pub enum RspamdCommand {

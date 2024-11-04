@@ -1,3 +1,9 @@
+//! This module contains encryption functions used by the HTTPCrypt protocol.
+//! This encryption is common to x25519 and chacha20-poly1305 as defined in RFC 8439.
+//! However, since HTTPCrypt has been designed before RFC being published, it uses
+//! a different way to do KEX and to derive shared keys.
+//! In general, it relies on hchacha20 for kdf and x25519 for key exchange.
+
 use crypto_box::{SecretKey, aead::{OsRng, AeadCore}, ChaChaBox};
 use crate::error::RspamdError;
 use rspamd_base32::{decode, encode};

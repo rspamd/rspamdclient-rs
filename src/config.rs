@@ -1,3 +1,9 @@
+//!
+//! ## Configuration for rspamd-client
+//!
+//! The `Config` struct allows you to customize various aspects of the client, including the base URL, proxy settings, and TLS settings.
+//!
+
 use typed_builder::TypedBuilder;
 
 /// Custom TLS settings for the Rspamd client
@@ -56,7 +62,7 @@ pub struct Config {
     #[builder(default=true)]
     pub zstd: bool,
 
-    /// Encryption key for the asynchronous client
+    /// Encryption key if using native HTTPCrypt encryption (must be in Rspamd base32 format)
     #[builder(default, setter(strip_option))]
     pub encryption_key: Option<String>,
 }

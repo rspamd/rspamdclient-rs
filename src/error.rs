@@ -1,3 +1,5 @@
+//! Error handling for the Rspamd API client.
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
