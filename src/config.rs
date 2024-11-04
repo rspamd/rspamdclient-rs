@@ -4,6 +4,8 @@
 //! The `Config` struct allows you to customize various aspects of the client, including the base URL, proxy settings, and TLS settings.
 //!
 
+use std::collections::HashMap;
+use std::iter::IntoIterator;
 use typed_builder::TypedBuilder;
 
 /// Custom TLS settings for the Rspamd client
@@ -30,6 +32,66 @@ pub struct ProxyConfig {
 
     /// Optional password for proxy authentication
     pub password: Option<String>,
+}
+
+#[derive(TypedBuilder, Debug, PartialEq, Default)]
+pub struct EnvelopeData {
+    /// Sender email address
+    #[builder(default, setter(strip_option))]
+    pub from: Option<String>,
+
+    /// Recipients email addresses
+    #[builder(default)]
+    pub rcpt: Vec<String>,
+
+    /// Optional IP address of the sender
+    #[builder(default, setter(strip_option))]
+    pub ip: Option<String>,
+
+    /// Optional IP of the sender
+    #[builder(default, setter(strip_option))]
+    pub user: Option<String>,
+
+    /// Optional HELO string
+    #[builder(default, setter(strip_option))]
+    pub helo: Option<String>,
+
+    /// Optional hostname
+    #[builder(default, setter(strip_option))]
+    pub hostname: Option<String>,
+
+    /// Optional additional headers
+    #[builder(default)]
+    pub additional_headers: HashMap<String, String>,
+}
+
+impl IntoIterator for EnvelopeData {
+    type Item = (String, String);
+    type IntoIter = std::collections::hash_map::IntoIter<String, String>;
+
+    /// Convert the EnvelopeData struct into an iterator
+    fn into_iter(mut self) -> Self::IntoIter {
+        // We add all options to the additional headers
+        if let Some(from) = self.from {
+            self.additional_headers.insert("From".to_string(), from);
+        }
+        if let Some(ip) = self.ip {
+            self.additional_headers.insert("IP".to_string(), ip);
+        }
+        if let Some(user) = self.user {
+            self.additional_headers.insert("User".to_string(), user);
+        }
+        if let Some(helo) = self.helo {
+            self.additional_headers.insert("Helo".to_string(), helo);
+        }
+        if let Some(hostname) = self.hostname {
+            self.additional_headers.insert("Hostname".to_string(), hostname);
+        }
+        for rcpt in self.rcpt {
+            self.additional_headers.insert("Rcpt".to_string(), rcpt);
+        }
+        self.additional_headers.into_iter()
+    }
 }
 
 /// Configuration for Rspamd client

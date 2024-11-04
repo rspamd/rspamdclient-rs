@@ -106,5 +106,5 @@ pub trait Request {
 	type HeaderMap;
 
 	/// Send the request and return the response
-	async fn response(&self) -> Result<(Self::HeaderMap, Self::Body), RspamdError>;
+	async fn response(self) -> Result<(Self::HeaderMap, Self::Body), RspamdError>;
 }

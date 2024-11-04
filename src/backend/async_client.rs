@@ -1,12 +1,13 @@
 use std::str::FromStr;
 use std::time::Duration;
+use std::collections::HashMap;
 use bytes::{Bytes, BytesMut};
 use reqwest::Client;
 use reqwest::header::{HeaderName, HeaderValue};
 use url::Url;
 use zstd::zstd_safe::WriteBuf;
 use crate::backend::traits::*;
-use crate::config::Config;
+use crate::config::{Config, EnvelopeData};
 use crate::error::RspamdError;
 use crate::protocol::commands::{RspamdCommand, RspamdEndpoint};
 use crate::protocol::RspamdScanReply;
@@ -55,6 +56,7 @@ pub struct ReqwestRequest<'a> {
 	endpoint: RspamdEndpoint<'a>,
 	client: AsyncClient<'a>,
 	body: Bytes,
+	envelope_data: Option<EnvelopeData>,
 }
 
 #[maybe_async::maybe_async]
@@ -62,9 +64,10 @@ impl<'a> Request for ReqwestRequest<'a> {
 	type Body = Bytes;
 	type HeaderMap = reqwest::header::HeaderMap;
 
-	async fn response(&self) -> Result<(Self::HeaderMap, Self::Body), RspamdError> {
+	async fn response(mut self) -> Result<(Self::HeaderMap, Self::Body), RspamdError> {
 		let mut retry_cnt = self.client.config.retries;
 		let mut maybe_sk = Default::default();
+		let extra_hdrs :  HashMap<String, String> = HashMap::from_iter(self.envelope_data.take().unwrap().into_iter());
 
 		let response = loop {
 			let method = if self.endpoint.need_body {  reqwest::Method::POST } else { reqwest::Method::GET };
@@ -81,6 +84,10 @@ impl<'a> Request for ReqwestRequest<'a> {
 			if self.client.config.zstd {
 				req = req.header("Content-Encoding", "zstd");
 				req = req.header("Compression", "zstd");
+			}
+
+			for (k, v) in extra_hdrs.iter() {
+				req = req.header(k, v);
 			}
 
 			if let Some(ref encryption_key) = self.client.config.encryption_key {
@@ -169,11 +176,13 @@ impl<'a> ReqwestRequest<'a> {
 		client: AsyncClient<'a>,
 		body: T,
 		command: RspamdCommand,
+		envelope_data: EnvelopeData,
 	) -> Result<ReqwestRequest<'a>, RspamdError> {
 		Ok(Self {
 			endpoint: RspamdEndpoint::from_command(command),
 			client,
 			body: body.into(),
+			envelope_data: Some(envelope_data),
 		})
 	}
 }
@@ -192,15 +201,16 @@ impl<'a> ReqwestRequest<'a> {
 /// 	let config = Config::builder()
 /// 		.base_url("http://localhost:11333".to_string())
 /// 		.build();
+/// 	let envelope = Default::default();
 /// 	let email = "...";
-/// 	let response = scan_async(&config, email).await?;
+/// 	let response = scan_async(&config, email, envelope).await?;
 /// 	Ok(())
 /// }
 /// ```
 #[maybe_async::maybe_async]
-pub async fn scan_async<T: Into<Bytes>>(options: &Config, body: T) -> Result<RspamdScanReply, RspamdError> {
+pub async fn scan_async<T: Into<Bytes>>(options: &Config, body: T, envelope_data: EnvelopeData) -> Result<RspamdScanReply, RspamdError> {
 	let client = async_client(options)?;
-	let request = ReqwestRequest::new(client, body, RspamdCommand::Scan).await?;
+	let request = ReqwestRequest::new(client, body, RspamdCommand::Scan, envelope_data).await?;
 	let (_, body) = request.response().await.map_err(|e| RspamdError::HttpError(e.to_string()))?;
 	let response = serde_json::from_slice::<RspamdScanReply>(body.as_ref())?;
 	Ok(response)
