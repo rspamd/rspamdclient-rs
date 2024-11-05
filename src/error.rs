@@ -37,6 +37,18 @@ pub enum RspamdError {
     InvalidHeaderName(#[from] reqwest::header::InvalidHeaderName),
 
     #[cfg(feature = "async")]
-    #[error("HTTP reqwest error: {0}")]
-    ReqwestError(#[from] reqwest::Error),
+    #[error("HTTP error: {0}")]
+    HTTPError(#[from] reqwest::Error),
+
+    #[cfg(feature = "sync")]
+    #[error("Invalid HTTP header value: {0}")]
+    InvalidHeaderValue(#[from] attohttpc::header::InvalidHeaderValue),
+
+    #[cfg(feature = "sync")]
+    #[error("Invalid HTTP header name: {0}")]
+    InvalidHeaderName(#[from] attohttpc::header::InvalidHeaderName),
+
+    #[cfg(feature = "sync")]
+    #[error("HTTP error: {0}")]
+    HTTPError(#[from] attohttpc::Error),
 }

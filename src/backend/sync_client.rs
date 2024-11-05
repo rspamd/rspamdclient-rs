@@ -1,5 +1,5 @@
-use attohttpc::{self, Response, Session, ProxySettingsBuilder};
-use attohttpc::header::HeaderMap;
+use attohttpc::{self, Session, ProxySettingsBuilder};
+use attohttpc::header::{HeaderMap, HeaderName, HeaderValue};
 use std::collections::HashMap;
 use std::time::Duration;
 use bytes::Bytes;
@@ -7,9 +7,10 @@ use std::str::FromStr;
 use std::fs;
 use url::Url;
 use crate::backend::traits::*;
-use crate::config::Config;
+use crate::config::{Config, EnvelopeData};
 use crate::error::RspamdError;
 use crate::protocol::commands::{RspamdCommand, RspamdEndpoint};
+use crate::protocol::encryption::{httpcrypt_decrypt, httpcrypt_encrypt, make_key_header};
 use crate::protocol::RspamdScanReply;
 
 pub struct SyncClient<'a> {
@@ -45,14 +46,17 @@ pub struct AttoRequest<'a> {
 	endpoint: RspamdEndpoint<'a>,
 	client: SyncClient<'a>,
 	body: Bytes,
+	envelope_data: Option<EnvelopeData>,
 }
 
 impl<'a> Request for AttoRequest<'a> {
-	type Response = Response;
+	type Body = Bytes;
 	type HeaderMap = HeaderMap;
 
-	fn response(&self) -> Result<Self::Response, RspamdError> {
+	fn response(mut self) -> Result<(Self::HeaderMap, Self::Body), RspamdError> {
 		let mut retry_cnt = self.client.config.retries;
+		let mut maybe_sk = Default::default();
+		let extra_hdrs :  HashMap<String, String> = HashMap::from_iter(self.envelope_data.take().unwrap().into_iter());
 
 		let response = loop {
 			let mut url = Url::from_str(self.client.config.base_url.as_str())
@@ -71,12 +75,17 @@ impl<'a> Request for AttoRequest<'a> {
 				Vec::new()
 			};
 
+
 			let mut req  = if self.endpoint.need_body {
-				self.client.inner.post(url)
+				self.client.inner.post(url.clone())
 			}
 			else {
-				self.client.inner.get(url)
+				self.client.inner.get(url.clone())
 			}.bytes(body);
+
+			for (k, v) in extra_hdrs.iter() {
+				req = req.header(HeaderName::from_str(k.as_str()).unwrap(), v.clone());
+			}
 
 			if let Some(ref password) = self.client.config.password {
 				req = req.header("Password", password);
@@ -85,6 +94,26 @@ impl<'a> Request for AttoRequest<'a> {
 			if self.client.config.zstd {
 				req = req.header("Content-Encoding", "zstd");
 				req = req.header("Compression", "zstd");
+			}
+
+			if let Some(ref encryption_key) = self.client.config.encryption_key {
+				let mut inner_req = req;
+				let body = if self.client.config.zstd {
+					zstd::encode_all(self.body.as_ref(), 0)?
+				}
+				else {
+					self.body.to_vec()
+				};
+				let encrypted = httpcrypt_encrypt(
+					url.path(),
+					body.as_slice(),
+					inner_req.inspect().headers(),
+					encryption_key.as_bytes(),
+				)?;
+				req = self.client.inner.post(url).bytes(encrypted.body);
+				let key_header = make_key_header(encryption_key.as_str(), encrypted.peer_key.as_str())?;
+				req = req.header("Key", key_header);
+				maybe_sk = Some(encrypted.shared_key);
 			}
 
 			req = req.timeout(Duration::from_secs_f64(self.client.config.timeout));
@@ -109,33 +138,36 @@ impl<'a> Request for AttoRequest<'a> {
 			)));
 		}
 
-		Ok(response)
-	}
+		if let Some(sk) = maybe_sk {
+			let mut body = response.bytes().map_err(|e| RspamdError::HttpError(e.to_string()))?;
+			let decrypted_offset = httpcrypt_decrypt(body.as_mut(), sk)?;
+			let mut hdrs = [httparse::EMPTY_HEADER; 64];
+			let mut parsed = httparse::Response::new(&mut hdrs);
 
-	fn response_data(&self) -> Result<ResponseData, RspamdError> {
-		let response = self.response()?;
-		let status_code = response.status().as_u16();
-		let headers = response.headers().clone();
-		let response_headers = headers
-			.iter()
-			.map(|(k, v)| {
-				(
-					k.to_string(),
-					v.to_str()
-						.unwrap_or("could-not-decode-header-value")
-						.to_string(),
-				)
-			})
-			.collect::<HashMap<String, String>>();
-		let body_vec = response.bytes().map_err(|e| RspamdError::HttpError(e.to_string()))?;
-		Ok(ResponseData::new(Bytes::from(body_vec), status_code, response_headers))
-	}
+			let body_offset = parsed.parse(&body.as_slice()[decrypted_offset..]).map_err(|s| RspamdError::HttpError(s.to_string()))?;
+			let mut output_hdrs = HeaderMap::with_capacity(parsed.headers.len());
+			for hdr in parsed.headers.into_iter() {
+				output_hdrs.insert(HeaderName::from_str(hdr.name)?, HeaderValue::from_str(std::str::from_utf8(hdr.value)?)?);
+			}
+			let body = if output_hdrs.get("Compression").map_or(false,
+																|hv| hv == "zstd") {
+				zstd::decode_all(&body.as_slice()[body_offset.unwrap() + decrypted_offset..])?
+			} else {
+				body.as_slice()[body_offset.unwrap() + decrypted_offset..].to_vec()
+			};
+			Ok((output_hdrs, body.into()))
+		}
+		else {
+			let headers = response.headers().clone();
+			let data = if response.headers().get("Compression").map_or(false, |hv| hv == "zstd") {
+				zstd::decode_all(response.bytes()?.as_slice())?
+			}
+			else {
+				response.bytes()?
+			};
 
-	fn response_header(&self) -> Result<(Self::HeaderMap, u16), RspamdError> {
-		let response = self.response()?;
-		let status_code = response.status().as_u16();
-		let headers = response.headers().clone();
-		Ok((headers, status_code))
+			Ok((headers, data.into()))
+		}
 	}
 }
 
@@ -144,11 +176,13 @@ impl<'a> AttoRequest<'a> {
 		client: SyncClient<'a>,
 		body: T,
 		command: RspamdCommand,
+		envelope_data: EnvelopeData,
 	) -> Result<AttoRequest<'a>, RspamdError> {
 		Ok(Self {
 			endpoint: RspamdEndpoint::from_command(command),
 			client,
 			body: body.into(),
+			envelope_data: Some(envelope_data),
 		})
 	}
 }
@@ -165,21 +199,14 @@ impl<'a> AttoRequest<'a> {
 ///             .base_url("http://localhost:11333".to_string())
 ///              .build();
 ///    let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
-///    let response = scan_sync(&config, email)?;
+///    let envelope = Default::default();
+///    let response = scan_sync(&config, email, envelope)?;
 ///    Ok(())
 /// }
 ///
-pub fn scan_sync<T: Into<Bytes>>(options: &Config, body: T) -> Result<RspamdScanReply, RspamdError> {
+pub fn scan_sync<T: Into<Bytes>>(options: &Config, body: T, envelope_data: EnvelopeData) -> Result<RspamdScanReply, RspamdError> {
 	let client = sync_client(options)?;
-	let request = AttoRequest::new(client, body, RspamdCommand::Scan)?;
-	let response = request.response().map_err(|e| RspamdError::HttpError(e.to_string()))?;
-	let is_compressed = response.headers().get("Compression").map(|hdr| return hdr == "zstd").unwrap_or_default();
-	let response = if is_compressed {
-		zstd::decode_all(response.bytes().map_err(|e| RspamdError::HttpError(e.to_string()))?.as_slice())?
-	}
-	else {
-		response.bytes().map_err(|e| RspamdError::HttpError(e.to_string()))?
-	};
-	let response = serde_json::from_slice::<RspamdScanReply>(&response)?;
-	Ok(response)
+	let request = AttoRequest::new(client, body, RspamdCommand::Scan, envelope_data)?;
+	let (_, body) = request.response().map_err(|e| RspamdError::HttpError(e.to_string()))?;
+	Ok(serde_json::from_slice::<RspamdScanReply>(body.as_ref())?)
 }

@@ -11,9 +11,13 @@ mod tests {
     fn test_sync_process() {
         let config = Config::builder()
             .base_url("http://localhost:11333".to_string())
+            .encryption_key("k4nz984k36xmcynm1hr9kdbn6jhcxf4ggbrb1quay7f88rpm9kay".to_string())
+            .build();
+        let envelope = EnvelopeData::builder()
+            .from("тест@example.com".to_string())
             .build();
         let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
-        let response = scan_sync(&config, email).unwrap();
+        let response = scan_sync(&config, email, envelope).unwrap();
         assert!(response.symbols.len() > 0);
     }
 
