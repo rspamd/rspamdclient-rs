@@ -52,8 +52,7 @@ impl RspamdSecretbox {
 	pub fn encrypt_in_place(mut self, data: &mut [u8]) -> Tag {
 		// Encrypt-then-mac
 		self.enc_ctx.apply_keystream(data);
-		let tag = self.mac_ctx.compute_unpadded(data);
-		tag
+		self.mac_ctx.compute_unpadded(data)
 	}
 
 	/// Decrypts in place if auth tag is correct
@@ -163,7 +162,7 @@ pub fn httpcrypt_decrypt(body: &mut [u8], nm: RspamdNM) -> Result<usize, RspamdE
 	let tag = Tag::from_slice(tag);
 	let mut offset = nonce.len();
 	let mut sbox = RspamdSecretbox::new(nm, *chacha20::XNonce::from_slice(nonce));
-	offset += sbox.decrypt_in_place(decrypted_dest, &tag)?;
+	offset += sbox.decrypt_in_place(decrypted_dest, tag)?;
 	Ok(offset)
 }
 

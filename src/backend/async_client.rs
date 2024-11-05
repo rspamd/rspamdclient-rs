@@ -110,15 +110,13 @@ impl<'a> Request for ReqwestRequest<'a> {
 				req = req.body(encrypted.body);
 				maybe_sk = Some(encrypted.shared_key);
 			}
-			else {
-				if self.endpoint.need_body {
-					req = if self.client.config.zstd {
-						req.body(reqwest::Body::from(zstd::encode_all(self.body.as_ref(), 0)?))
-					}
-					else {
-						req.body(self.body.clone())
-					};
+			else if self.endpoint.need_body {
+				req = if self.client.config.zstd {
+					req.body(reqwest::Body::from(zstd::encode_all(self.body.as_ref(), 0)?))
 				}
+				else {
+					req.body(self.body.clone())
+				};
 			}
 
 			let req = req.timeout(Duration::from_secs_f64(self.client.config.timeout));
@@ -153,7 +151,7 @@ impl<'a> Request for ReqwestRequest<'a> {
 
 			let body_offset = parsed.parse(&body.as_slice()[decrypted_offset..]).map_err(|s| RspamdError::HttpError(s.to_string()))?;
 			let mut output_hdrs = reqwest::header::HeaderMap::with_capacity(parsed.headers.len());
-			for hdr in parsed.headers.into_iter() {
+			for hdr in parsed.headers.iter_mut() {
 				output_hdrs.insert(HeaderName::from_str(hdr.name)?, HeaderValue::from_str(std::str::from_utf8(hdr.value)?)?);
 			}
 			let body = if output_hdrs.get("Compression").map_or(false,
