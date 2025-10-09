@@ -59,11 +59,15 @@ impl<'a> Request for AttoRequest<'a> {
 		let extra_hdrs :  HashMap<String, String> = HashMap::from_iter(self.envelope_data.take().unwrap().into_iter());
 
 		let response = loop {
+			// Check if File header is present - if so, we don't need to send the body
+			let has_file_header = extra_hdrs.contains_key("File");
+			let need_body = self.endpoint.need_body && !has_file_header;
+
 			let mut url = Url::from_str(self.client.config.base_url.as_str())
 				.map_err(|e| RspamdError::HttpError(e.to_string()))?;
 			url.set_path(self.endpoint.url);
 
-			let body = if self.endpoint.need_body {
+			let body = if need_body {
 				if self.client.config.zstd {
 					zstd::encode_all(self.body.as_ref(), 0)
 						.map_err(|e| RspamdError::HttpError(e.to_string()))?
@@ -76,7 +80,7 @@ impl<'a> Request for AttoRequest<'a> {
 			};
 
 
-			let mut req  = if self.endpoint.need_body {
+			let mut req  = if need_body {
 				self.client.inner.post(url.clone())
 			}
 			else {
@@ -91,18 +95,22 @@ impl<'a> Request for AttoRequest<'a> {
 				req = req.header("Password", password);
 			}
 
-			if self.client.config.zstd {
+			if self.client.config.zstd && need_body {
 				req = req.header("Content-Encoding", "zstd");
 				req = req.header("Compression", "zstd");
 			}
 
 			if let Some(ref encryption_key) = self.client.config.encryption_key {
 				let mut inner_req = req;
-				let body = if self.client.config.zstd {
-					zstd::encode_all(self.body.as_ref(), 0)?
-				}
-				else {
-					self.body.to_vec()
+				let body = if need_body {
+					if self.client.config.zstd {
+						zstd::encode_all(self.body.as_ref(), 0)?
+					}
+					else {
+						self.body.to_vec()
+					}
+				} else {
+					Vec::new()
 				};
 				let encrypted = httpcrypt_encrypt(
 					url.path(),
