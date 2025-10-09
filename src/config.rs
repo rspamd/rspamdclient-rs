@@ -60,6 +60,12 @@ pub struct EnvelopeData {
     #[builder(default, setter(strip_option))]
     pub hostname: Option<String>,
 
+    /// Optional file path for local file scanning (File header)
+    /// When set, the message body is not transmitted and Rspamd reads the file directly from disk
+    /// This is a significant optimization when client and server are on the same host
+    #[builder(default, setter(strip_option))]
+    pub file_path: Option<String>,
+
     /// Optional additional headers
     #[builder(default)]
     pub additional_headers: HashMap<String, String>,
@@ -86,6 +92,9 @@ impl IntoIterator for EnvelopeData {
         }
         if let Some(hostname) = self.hostname {
             self.additional_headers.insert("Hostname".to_string(), hostname);
+        }
+        if let Some(file_path) = self.file_path {
+            self.additional_headers.insert("File".to_string(), file_path);
         }
         for rcpt in self.rcpt {
             self.additional_headers.insert("Rcpt".to_string(), rcpt);

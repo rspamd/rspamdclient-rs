@@ -44,4 +44,38 @@ mod tests {
         let response = scan_async(&config, email, envelope).await.unwrap();
         assert!(response.symbols.len() > 0);
     }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn test_sync_file_header() {
+        // Test scanning with File header (local file path)
+        // This requires Rspamd server to be on the same host and have access to the file
+        let config = Config::builder()
+            .base_url("http://localhost:11333".to_string())
+            .build();
+        let envelope = EnvelopeData::builder()
+            .from("user@example.com".to_string())
+            .file_path("/tmp/test_email.eml".to_string())
+            .build();
+        // Body is not transmitted when file_path is set, but still required by API
+        let _response = scan_sync(&config, "", envelope).unwrap();
+        // Test passes if no error is returned
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_async_file_header() {
+        // Test scanning with File header (local file path)
+        // This requires Rspamd server to be on the same host and have access to the file
+        let config = Config::builder()
+            .base_url("http://localhost:11333".to_string())
+            .build();
+        let envelope = EnvelopeData::builder()
+            .from("user@example.com".to_string())
+            .file_path("/tmp/test_email.eml".to_string())
+            .build();
+        // Body is not transmitted when file_path is set, but still required by API
+        let _response = scan_async(&config, "", envelope).await.unwrap();
+        // Test passes if no error is returned
+    }
 }
