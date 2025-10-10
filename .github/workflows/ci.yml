@@ -28,20 +28,46 @@ jobs:
 
       - name: Start Rspamd container
         run: |
+          echo "Starting Rspamd container..."
           docker compose up -d rspamd
-          echo "Waiting for Rspamd to be ready..."
-          # Wait for Rspamd to be healthy (increased timeout for GitHub Actions)
-          timeout 180 sh -c 'until docker compose exec rspamd curl -f http://localhost:11333/ping > /dev/null 2>&1; do echo "Waiting for Rspamd..."; sleep 3; done'
-          echo "Rspamd is ready!"
-          # Create test file for File header tests
+
+          echo "Waiting for container to start..."
+          sleep 5
+
+          echo "Checking container status..."
+          docker compose ps
+
+          echo "Checking Rspamd logs..."
+          docker compose logs rspamd | tail -20
+
+          echo "Waiting for Rspamd HTTP API to be ready..."
+          # Use curl from host instead of exec into container
+          for i in {1..60}; do
+            if curl -sf http://localhost:11333/ping > /dev/null 2>&1; then
+              echo "Rspamd is ready!"
+              break
+            fi
+            echo "Attempt $i/60: Waiting for Rspamd..."
+            sleep 3
+          done
+
+          # Verify Rspamd is responding
+          if ! curl -sf http://localhost:11333/ping > /dev/null 2>&1; then
+            echo "ERROR: Rspamd failed to start!"
+            docker compose logs rspamd
+            exit 1
+          fi
+
+          echo "Creating test file for File header tests..."
           echo "From: test@example.com" > /tmp/test_email.eml
           echo "To: user@example.com" >> /tmp/test_email.eml
           echo "Subject: Test" >> /tmp/test_email.eml
           echo "" >> /tmp/test_email.eml
           echo "Test email body" >> /tmp/test_email.eml
-          # Copy test file into container
+
+          echo "Copying test file to container..."
           docker cp /tmp/test_email.eml rspamd-test:/tmp/test_email.eml
-          echo "Test file prepared"
+          echo "Test environment ready!"
 
       - name: Install Rust ${{ matrix.rust }}
         uses: dtolnay/rust-toolchain@master
@@ -89,10 +115,24 @@ jobs:
 
       - name: Start Rspamd container (for test compilation)
         run: |
+          echo "Starting Rspamd container..."
           docker compose up -d rspamd
-          echo "Waiting for Rspamd to be ready..."
-          timeout 180 sh -c 'until docker compose exec rspamd curl -f http://localhost:11333/ping > /dev/null 2>&1; do echo "Waiting for Rspamd..."; sleep 3; done'
-          echo "Rspamd is ready!"
+
+          echo "Waiting for Rspamd HTTP API to be ready..."
+          for i in {1..60}; do
+            if curl -sf http://localhost:11333/ping > /dev/null 2>&1; then
+              echo "Rspamd is ready!"
+              break
+            fi
+            echo "Attempt $i/60: Waiting for Rspamd..."
+            sleep 3
+          done
+
+          if ! curl -sf http://localhost:11333/ping > /dev/null 2>&1; then
+            echo "ERROR: Rspamd failed to start!"
+            docker compose logs rspamd
+            exit 1
+          fi
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
