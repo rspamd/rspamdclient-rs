@@ -66,6 +66,13 @@ pub struct EnvelopeData {
     #[builder(default, setter(strip_option))]
     pub file_path: Option<String>,
 
+    /// Request rewritten body in response (body_block flag)
+    /// When enabled, if Rspamd rewrites the message body, it will be returned
+    /// as a separate part of the reply after the JSON, with Message-Offset header
+    /// indicating where the body starts
+    #[builder(default)]
+    pub body_block: bool,
+
     /// Optional additional headers
     #[builder(default)]
     pub additional_headers: HashMap<String, String>,
@@ -95,6 +102,9 @@ impl IntoIterator for EnvelopeData {
         }
         if let Some(file_path) = self.file_path {
             self.additional_headers.insert("File".to_string(), file_path);
+        }
+        if self.body_block {
+            self.additional_headers.insert("Flags".to_string(), "body_block".to_string());
         }
         for rcpt in self.rcpt {
             self.additional_headers.insert("Rcpt".to_string(), rcpt);

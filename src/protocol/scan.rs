@@ -45,6 +45,10 @@ pub struct RspamdScanReply {
 	pub filename: String,
 	#[serde(default)]
 	pub scan_time: f64,
+	/// Rewritten message body (only present when body_block flag is set and message was rewritten)
+	/// This field is not part of the JSON response but is extracted from the response body
+	#[serde(skip)]
+	pub rewritten_body: Option<Vec<u8>>,
 }
 
 /// Symbol structure

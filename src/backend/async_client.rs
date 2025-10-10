@@ -216,7 +216,31 @@ impl<'a> ReqwestRequest<'a> {
 pub async fn scan_async<T: Into<Bytes>>(options: &Config, body: T, envelope_data: EnvelopeData) -> Result<RspamdScanReply, RspamdError> {
 	let client = async_client(options)?;
 	let request = ReqwestRequest::new(client, body, RspamdCommand::Scan, envelope_data).await?;
-	let (_, body) = request.response().await.map_err(|e| RspamdError::HttpError(e.to_string()))?;
-	let response = serde_json::from_slice::<RspamdScanReply>(body.as_ref())?;
+	let (headers, body) = request.response().await.map_err(|e| RspamdError::HttpError(e.to_string()))?;
+
+	// Check for Message-Offset header to handle body_block feature
+	let response = if let Some(offset_header) = headers.get("Message-Offset") {
+		let offset = offset_header.to_str()
+			.map_err(|e| RspamdError::HttpError(format!("Invalid Message-Offset header: {}", e)))?
+			.parse::<usize>()
+			.map_err(|e| RspamdError::HttpError(format!("Invalid Message-Offset value: {}", e)))?;
+
+		if offset < body.len() {
+			// Split body into JSON part and rewritten body part
+			let json_part = &body[..offset];
+			let body_part = &body[offset..];
+
+			let mut response = serde_json::from_slice::<RspamdScanReply>(json_part)?;
+			response.rewritten_body = Some(body_part.to_vec());
+			response
+		} else {
+			// Offset is out of bounds, parse entire body as JSON
+			serde_json::from_slice::<RspamdScanReply>(body.as_ref())?
+		}
+	} else {
+		// No Message-Offset header, parse entire body as JSON
+		serde_json::from_slice::<RspamdScanReply>(body.as_ref())?
+	};
+
 	Ok(response)
 }
