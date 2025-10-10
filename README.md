@@ -4,10 +4,15 @@ This crate provides an HTTP client for interacting with the Rspamd service in Ru
 
 ## Features
 
-- **Sync**: Synchronous client using `attohttpc`.
-- **Async**: Asynchronous client using `reqwest`.
-- Easily configurable with support for proxy and custom TLS settings.
-- Supports scanning emails for spam scores and other metrics.
+- **Sync/Async**: Choose between synchronous (`attohttpc`) or asynchronous (`reqwest`) client
+- **Mutually Exclusive**: Async and sync features are mutually exclusive by design
+- **Encryption**: Native HTTPCrypt encryption support
+- **Compression**: ZSTD compression for requests and responses
+- **Local File Scanning**: Scan files on the same host without transferring body (`File` header)
+- **Body Rewriting**: Receive rewritten message bodies (`body_block` flag)
+- **Envelope Data**: Configure sender, recipients, IP, HELO, hostname, and custom headers
+- **Proxy Support**: HTTP proxy configuration
+- **TLS**: Custom TLS settings
 
 ## Installation
 
@@ -15,177 +20,200 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rspamd-client = { version = "0.1", features = ["async"] }
+rspamd-client = { version = "0.4", features = ["async"] }
 ```
 
-Enable the `sync` and/or `async` features based on your requirements.
+Enable either the `sync` or `async` feature (but not both):
+- `async` (default): Uses `reqwest` and `tokio`
+- `sync`: Uses `attohttpc`
 
 ## Usage
 
-### Synchronous Client
-
-This example demonstrates how to scan an email using the synchronous client.
-
-```rust
-use rspamd_client::{Config, scan_sync};
-
-fn main() {
-    let config = Config::builder()
-        .base_url("http://localhost:11333".to_string())
-        .build();
-    let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
-
-    match scan_sync(&config, email) {
-        Ok(response) => println!("Scan result: {:?}", response),
-        Err(e) => eprintln!("Error scanning email: {}", e),
-    }
-}
-```
-
 ### Asynchronous Client
 
-This example demonstrates how to scan an email using the asynchronous client.
-
 ```rust
-use rspamd_client::{Config, scan_async};
-use tokio;
+use rspamd_client::{Config, EnvelopeData, scan_async};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .base_url("http://localhost:11333".to_string())
         .build();
+
+    let envelope = EnvelopeData::builder()
+        .from("sender@example.com".to_string())
+        .rcpt(vec!["recipient@example.com".to_string()])
+        .ip("127.0.0.1".to_string())
+        .build();
+
     let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
 
-    match scan_async(&config, email).await {
-        Ok(response) => println!("Scan result: {:?}", response),
-        Err(e) => eprintln!("Error scanning email: {}", e),
-    }
+    let response = scan_async(&config, email, envelope).await?;
+    println!("Score: {}, Action: {}", response.score, response.action);
+    Ok(())
 }
 ```
 
-### Scan File Example
-
-You can scan a file by reading its content into a `bytes::Bytes` object and sending it to Rspamd.
+### Synchronous Client
 
 ```rust
-use rspamd_client::{Config, scan_sync};
-use bytes::Bytes;
-use std::fs;
+use rspamd_client::{Config, EnvelopeData, scan_sync};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .base_url("http://localhost:11333".to_string())
         .build();
-    let file_content = fs::read("path/to/email.eml")
-        .expect("Unable to read file");
-    let email = Bytes::from(file_content);
 
-    match scan_sync(&config, &email) {
-        Ok(response) => println!("Scan result: {:?}", response),
-        Err(e) => eprintln!("Error scanning email: {}", e),
-    }
+    let envelope = EnvelopeData::builder()
+        .from("sender@example.com".to_string())
+        .build();
+
+    let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
+
+    let response = scan_sync(&config, email, envelope)?;
+    println!("Score: {}, Action: {}", response.score, response.action);
+    Ok(())
 }
 ```
 
-### Configuration
+## Advanced Features
 
-The `Config` struct allows you to customize various aspects of the client, including the base URL, proxy settings, and TLS settings.
+### Local File Scanning (File Header)
+
+When the client and Rspamd server are on the same host, you can scan files without transferring the body by using the `file_path` option. This is a significant performance optimization:
 
 ```rust
-#[derive(Debug)]
-pub struct Config<'a> {
-    pub base_url: &'a str,
-    pub password: Option<String>,
-    pub timeout: f64,
-    pub retries: u32,
-    pub zstd: bool,
-    pub proxy_config: Option<ProxyConfig>,
-    pub tls_settings: Option<TlsSettings>,
-}
+use rspamd_client::{Config, EnvelopeData, scan_async};
 
-impl<'a> Config<'a> {
-    pub fn builder() -> ConfigBuilder<'a> {
-        ConfigBuilder::default()
-    }
-}
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::builder()
+        .base_url("http://localhost:11333".to_string())
+        .build();
 
-#[derive(Debug)]
-pub struct ProxyConfig {
-    pub proxy_url: String,
-}
+    let envelope = EnvelopeData::builder()
+        .from("sender@example.com".to_string())
+        .file_path("/var/mail/message.eml".to_string())  // Rspamd reads file directly
+        .build();
 
-#[derive(Debug)]
-pub struct TlsSettings {
-    pub ca_path: Option<String>,
+    // Empty body - file is read by Rspamd from disk
+    let response = scan_async(&config, "", envelope).await?;
+    println!("Scanned file with score: {}", response.score);
+    Ok(())
 }
 ```
 
-### Response Structures
+### Body Block (Rewritten Message)
 
-The following structures are used to deserialize the responses from Rspamd:
+Request the rewritten message body from Rspamd when modifications are applied (e.g., subject rewriting, header changes):
 
 ```rust
-#[derive(Debug, Serialize, Deserialize)]
+use rspamd_client::{Config, EnvelopeData, scan_async};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::builder()
+        .base_url("http://localhost:11333".to_string())
+        .build();
+
+    let envelope = EnvelopeData::builder()
+        .from("sender@example.com".to_string())
+        .body_block(true)  // Request rewritten body if modified
+        .build();
+
+    let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nBody content.";
+
+    let response = scan_async(&config, email, envelope).await?;
+
+    if let Some(rewritten_body) = response.rewritten_body {
+        println!("Message was rewritten, new body size: {} bytes", rewritten_body.len());
+        // Use rewritten_body instead of original
+    }
+    Ok(())
+}
+```
+
+### Encryption (HTTPCrypt)
+
+Use native Rspamd HTTPCrypt encryption:
+
+```rust
+let config = Config::builder()
+    .base_url("http://localhost:11333".to_string())
+    .encryption_key("k4nz984k36xmcynm1hr9kdbn6jhcxf4ggbrb1quay7f88rpm9kay".to_string())
+    .build();
+```
+
+The encryption key must be in Rspamd base32 format and match the server's public key.
+
+### Compression
+
+ZSTD compression is enabled by default. To disable:
+
+```rust
+let config = Config::builder()
+    .base_url("http://localhost:11333".to_string())
+    .zstd(false)
+    .build();
+```
+
+### Proxy Configuration
+
+```rust
+use rspamd_client::{Config, ProxyConfig};
+
+let proxy = ProxyConfig {
+    proxy_url: "http://proxy.example.com:8080".to_string(),
+    username: Some("user".to_string()),
+    password: Some("pass".to_string()),
+};
+
+let config = Config::builder()
+    .base_url("http://localhost:11333".to_string())
+    .proxy_config(proxy)
+    .build();
+```
+
+## Configuration
+
+### Config Options
+
+- `base_url`: Rspamd server URL (required)
+- `password`: Optional authentication password
+- `timeout`: Request timeout in seconds (default: 30.0)
+- `retries`: Number of retry attempts (default: 1)
+- `zstd`: Enable ZSTD compression (default: true)
+- `encryption_key`: HTTPCrypt encryption key (optional)
+- `proxy_config`: HTTP proxy settings (optional)
+- `tls_settings`: Custom TLS configuration (optional)
+
+### EnvelopeData Options
+
+- `from`: Sender email address
+- `rcpt`: List of recipient email addresses
+- `ip`: Sender IP address
+- `user`: Authenticated username
+- `helo`: SMTP HELO string
+- `hostname`: Resolved hostname
+- `file_path`: Local file path for scanning (instead of body transfer)
+- `body_block`: Request rewritten body in response
+- `additional_headers`: Custom HTTP headers
+
+## Response Structure
+
+```rust
 pub struct RspamdScanReply {
-    #[serde(default)]
-    pub is_skipped: bool,
-    #[serde(default)]
-    pub score: f64,
-    #[serde(default)]
-    pub required_score: f64,
-    #[serde(default)]
-    pub action: String,
-    #[serde(default)]
-    pub thresholds: HashMap<String, f64>,
-    #[serde(default)]
-    pub symbols: HashMap<String, Symbol>,
-    #[serde(default)]
-    pub messages: HashMap<String, String>,
-    #[serde(default)]
-    pub urls: Vec<String>,
-    #[serde(default)]
-    pub emails: Vec<String>,
-    #[serde(rename = "message-id", default)]
-    pub message_id: String,
-    #[serde(default)]
-    pub time_real: f64,
-    #[serde(default)]
-    pub milter: Option<Milter>,
-    #[serde(default)]
-    pub filename: String,
-    #[serde(default)]
-    pub scan_time: f64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Symbol {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub score: f64,
-    #[serde(default)]
-    pub metric_score: f64,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub options: Option<Vec<String>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Milter {
-    #[serde(default)]
-    pub add_headers: HashMap<String, MailHeader>,
-    #[serde(default)]
-    pub remove_headers: HashMap<String, i32>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MailHeader {
-    #[serde(default)]
-    pub value: String,
-    #[serde(default)]
-    pub order: i32,
+    pub score: f64,                              // Spam score
+    pub action: String,                          // Action to take (e.g., "reject", "add header")
+    pub symbols: HashMap<String, Symbol>,        // Detected symbols
+    pub messages: HashMap<String, String>,       // Messages from Rspamd
+    pub urls: Vec<String>,                       // Extracted URLs
+    pub emails: Vec<String>,                     // Extracted emails
+    pub message_id: String,                      // Message ID
+    pub time_real: f64,                          // Scan time
+    pub milter: Option<Milter>,                  // Milter actions (headers to add/remove)
+    pub rewritten_body: Option<Vec<u8>>,         // Rewritten message body (if body_block enabled)
+    // ... other fields
 }
 ```
 
@@ -195,7 +223,11 @@ This project is licensed under the Apache 2.0 License.
 
 ## Contributing
 
-Contributions are welcome! Please open a pull request or issue on GitHub.
+Contributions are welcome! Please open a pull request or issue on [GitHub](https://github.com/rspamd/rspamdclient-rs).
 
----
-For more information, please refer to the [Rust documentation](https://doc.rust-lang.org/) and [Rspamd documentation](https://rspamd.com/doc/).
+## Links
+
+- [Crates.io](https://crates.io/crates/rspamd-client)
+- [Documentation](https://docs.rs/rspamd-client)
+- [Rspamd Documentation](https://rspamd.com/doc/)
+- [Rspamd Protocol](https://docs.rspamd.com/developers/protocol/)
