@@ -26,6 +26,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Start Rspamd container
+        run: |
+          docker compose up -d rspamd
+          # Wait for Rspamd to be healthy
+          timeout 60 sh -c 'until docker compose exec rspamd curl -f http://localhost:11333/ping > /dev/null 2>&1; do sleep 2; done'
+          # Create test file for File header tests
+          echo "From: test@example.com" > /tmp/test_email.eml
+          echo "To: user@example.com" >> /tmp/test_email.eml
+          echo "Subject: Test" >> /tmp/test_email.eml
+          echo "" >> /tmp/test_email.eml
+          echo "Test email body" >> /tmp/test_email.eml
+          # Copy test file into container
+          docker cp /tmp/test_email.eml rspamd-test:/tmp/test_email.eml
+
       - name: Install Rust ${{ matrix.rust }}
         uses: dtolnay/rust-toolchain@master
         with:
@@ -50,10 +64,14 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --verbose --features ${{ matrix.features }} --no-fail-fast
+        run: cargo test --verbose --no-default-features --features ${{ matrix.features }} --no-fail-fast
 
       - name: Run doc tests
-        run: cargo test --doc --features ${{ matrix.features }}
+        run: cargo test --doc --no-default-features --features ${{ matrix.features }}
+
+      - name: Stop Rspamd container
+        if: always()
+        run: docker compose down
 
   clippy:
     name: Clippy
@@ -65,6 +83,9 @@ jobs:
           - sync
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start Rspamd container (for test compilation)
+        run: docker compose up -d rspamd
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -90,7 +111,11 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run clippy
-        run: cargo clippy --features ${{ matrix.features }} --all-targets -- -D warnings
+        run: cargo clippy --no-default-features --features ${{ matrix.features }} --all-targets -- -D warnings
+
+      - name: Stop Rspamd container
+        if: always()
+        run: docker compose down
 
   fmt:
     name: Rustfmt
@@ -140,7 +165,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build
-        run: cargo build --verbose --features ${{ matrix.features }}
+        run: cargo build --verbose --no-default-features --features ${{ matrix.features }}
 
       - name: Build release
-        run: cargo build --release --features ${{ matrix.features }}
+        run: cargo build --release --no-default-features --features ${{ matrix.features }}

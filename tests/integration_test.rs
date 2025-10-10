@@ -18,7 +18,7 @@ mod tests {
             .build();
         let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
         let response = scan_sync(&config, email, envelope).unwrap();
-        assert!(response.symbols.len() > 0);
+        assert!(!response.symbols.is_empty());
     }
 
     #[cfg(feature = "async")]
@@ -42,7 +42,7 @@ mod tests {
             .build();
         let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
         let response = scan_async(&config, email, envelope).await.unwrap();
-        assert!(response.symbols.len() > 0);
+        assert!(!response.symbols.is_empty());
     }
 
     #[cfg(feature = "sync")]

@@ -98,13 +98,16 @@ impl IntoIterator for EnvelopeData {
             self.additional_headers.insert("Helo".to_string(), helo);
         }
         if let Some(hostname) = self.hostname {
-            self.additional_headers.insert("Hostname".to_string(), hostname);
+            self.additional_headers
+                .insert("Hostname".to_string(), hostname);
         }
         if let Some(file_path) = self.file_path {
-            self.additional_headers.insert("File".to_string(), file_path);
+            self.additional_headers
+                .insert("File".to_string(), file_path);
         }
         if self.body_block {
-            self.additional_headers.insert("Flags".to_string(), "body_block".to_string());
+            self.additional_headers
+                .insert("Flags".to_string(), "body_block".to_string());
         }
         for rcpt in self.rcpt {
             self.additional_headers.insert("Rcpt".to_string(), rcpt);
@@ -114,7 +117,7 @@ impl IntoIterator for EnvelopeData {
 }
 
 /// Configuration for Rspamd client
-#[derive(TypedBuilder,Debug, PartialEq)]
+#[derive(TypedBuilder, Debug, PartialEq)]
 pub struct Config {
     /// Base URL of Rspamd server
     pub base_url: String,
@@ -124,11 +127,11 @@ pub struct Config {
     pub password: Option<String>,
 
     /// Timeout duration for requests
-    #[builder(default=30.0)]
+    #[builder(default = 30.0)]
     pub timeout: f64,
 
     /// Number of retries for requests
-    #[builder(default=1)]
+    #[builder(default = 1)]
     pub retries: u32,
 
     /// Custom TLS settings for the asynchronous client
@@ -140,7 +143,7 @@ pub struct Config {
     pub proxy_config: Option<ProxyConfig>,
 
     /// Use zstd compression
-    #[builder(default=true)]
+    #[builder(default = true)]
     pub zstd: bool,
 
     /// Encryption key if using native HTTPCrypt encryption (must be in Rspamd base32 format)

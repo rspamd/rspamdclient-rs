@@ -1,0 +1,17 @@
+services:
+  rspamd:
+    image: rspamd/rspamd:latest
+    container_name: rspamd-test
+    ports:
+      - "11333:11333"
+      - "11334:11334"
+    volumes:
+      - ./tests/rspamd-config:/etc/rspamd/local.d
+    environment:
+      - RSPAMD_CHECK_ALL_FILTERS=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11333/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s

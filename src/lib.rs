@@ -24,53 +24,51 @@ pub mod protocol;
 
 pub mod backend;
 
+#[cfg(feature = "sync")]
+pub use backend::sync_client::scan_sync;
 /// ### Synchronous Client
 ///
 /// This example demonstrates how to scan an email using the synchronous client.
 ///
-/// ```rust
+/// ```rust,no_run
 /// use rspamd_client::{config, scan_sync};
 ///
-/// fn main() {
-///    let config = config::Config::builder()
-///         .base_url("http://localhost:11333".to_string())
-///         .build();
-///     let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
+/// let config = config::Config::builder()
+///     .base_url("http://localhost:11333".to_string())
+///     .build();
+/// let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
 ///
-///     match scan_sync(&config, email, Default::default()) {
-///         Ok(response) => println!("Scan result: {:?}", response),
-///         Err(e) => eprintln!("Error scanning email: {}", e),
-///     }
+/// match scan_sync(&config, email, Default::default()) {
+///     Ok(response) => println!("Scan result: {:?}", response),
+///     Err(e) => eprintln!("Error scanning email: {}", e),
 /// }
 /// ```
 ///
 #[cfg(feature = "sync")]
 pub use backend::sync_client::SyncClient;
-#[cfg(feature = "sync")]
-pub use backend::sync_client::scan_sync;
 
+#[cfg(feature = "async")]
+pub use backend::async_client::scan_async;
 /// ### Asynchronous Client
 ///
 /// This example demonstrates how to scan an email using the asynchronous client.
 ///
-/// ```rust
+/// ```rust,no_run
 /// use rspamd_client::{config, scan_async};
-/// use tokio;
+/// # use tokio;
 ///
-/// #[tokio::main]
-/// async fn main() {
-///     let config = config::Config::builder()
-///         .base_url("http://localhost:11333".to_string())
-///         .build();
-///     let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
+/// # #[tokio::main]
+/// # async fn main() {
+/// let config = config::Config::builder()
+///     .base_url("http://localhost:11333".to_string())
+///     .build();
+/// let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
 ///
-///     match scan_async(&config, email, Default::default()).await {
-///         Ok(response) => println!("Scan result: {:?}", response),
-///         Err(e) => eprintln!("Error scanning email: {}", e),
-///     }
+/// match scan_async(&config, email, Default::default()).await {
+///     Ok(response) => println!("Scan result: {:?}", response),
+///     Err(e) => eprintln!("Error scanning email: {}", e),
 /// }
+/// # }
 /// ```
 #[cfg(feature = "async")]
 pub use backend::async_client::AsyncClient;
-#[cfg(feature = "async")]
-pub use backend::async_client::scan_async;
