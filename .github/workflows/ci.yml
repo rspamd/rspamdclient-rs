@@ -29,8 +29,10 @@ jobs:
       - name: Start Rspamd container
         run: |
           docker compose up -d rspamd
-          # Wait for Rspamd to be healthy
-          timeout 60 sh -c 'until docker compose exec rspamd curl -f http://localhost:11333/ping > /dev/null 2>&1; do sleep 2; done'
+          echo "Waiting for Rspamd to be ready..."
+          # Wait for Rspamd to be healthy (increased timeout for GitHub Actions)
+          timeout 180 sh -c 'until docker compose exec rspamd curl -f http://localhost:11333/ping > /dev/null 2>&1; do echo "Waiting for Rspamd..."; sleep 3; done'
+          echo "Rspamd is ready!"
           # Create test file for File header tests
           echo "From: test@example.com" > /tmp/test_email.eml
           echo "To: user@example.com" >> /tmp/test_email.eml
@@ -39,6 +41,7 @@ jobs:
           echo "Test email body" >> /tmp/test_email.eml
           # Copy test file into container
           docker cp /tmp/test_email.eml rspamd-test:/tmp/test_email.eml
+          echo "Test file prepared"
 
       - name: Install Rust ${{ matrix.rust }}
         uses: dtolnay/rust-toolchain@master
@@ -85,7 +88,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Start Rspamd container (for test compilation)
-        run: docker compose up -d rspamd
+        run: |
+          docker compose up -d rspamd
+          echo "Waiting for Rspamd to be ready..."
+          timeout 180 sh -c 'until docker compose exec rspamd curl -f http://localhost:11333/ping > /dev/null 2>&1; do echo "Waiting for Rspamd..."; sleep 3; done'
+          echo "Rspamd is ready!"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
