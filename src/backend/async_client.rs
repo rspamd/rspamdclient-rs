@@ -19,7 +19,7 @@ pub struct AsyncClient<'a> {
 }
 
 #[cfg(feature = "async")]
-pub fn async_client(options: &Config) -> Result<AsyncClient, RspamdError> {
+pub fn async_client(options: &Config) -> Result<AsyncClient<'_>, RspamdError> {
 	let client = Client::builder()
 		.timeout(Duration::from_secs_f64(options.timeout));
 

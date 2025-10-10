@@ -11,6 +11,13 @@
 //! - Easily configurable with support for proxy, encryption, TLS and ZSTD compression.
 //! - Supports scanning emails for spam scores and other metrics.
 
+// Ensure async and sync features are mutually exclusive
+#[cfg(all(feature = "async", feature = "sync"))]
+compile_error!("Features 'async' and 'sync' are mutually exclusive. Please enable only one.");
+
+#[cfg(not(any(feature = "async", feature = "sync")))]
+compile_error!("Either 'async' or 'sync' feature must be enabled.");
+
 pub mod config;
 pub mod error;
 pub mod protocol;

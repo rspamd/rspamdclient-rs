@@ -18,7 +18,7 @@ pub struct SyncClient<'a> {
 	inner: Session,
 }
 
-pub fn sync_client(options: &Config) -> Result<SyncClient, RspamdError> {
+pub fn sync_client(options: &Config) -> Result<SyncClient<'_>, RspamdError> {
 	let mut client = Session::new();
 	client.timeout(Duration::from_secs_f64(options.timeout));
 
