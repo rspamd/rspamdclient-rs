@@ -1,0 +1,32 @@
+version: 2
+updates:
+  # Maintain dependencies for Cargo
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "09:00"
+      timezone: "UTC"
+    # Group all dependencies into a single PR to reduce noise
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
+    # Add labels to PRs
+    labels:
+      - "dependencies"
+      - "rust"
+    # Limit number of open PRs
+    open-pull-requests-limit: 5
+    # Commit message prefix
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+    # Allow both direct and indirect updates
+    allow:
+      - dependency-type: "all"
+    # Ignore major version updates for stable dependencies (optional)
+    # You can customize this based on your needs
+    reviewers:
+      - "vstakhov"
