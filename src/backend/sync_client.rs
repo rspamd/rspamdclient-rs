@@ -48,14 +48,14 @@ pub fn sync_client(options: &Config) -> Result<SyncClient<'_>, RspamdError> {
     })
 }
 
-pub struct AttoRequest<'a> {
+pub struct AttoRequest<'a, B> {
     endpoint: RspamdEndpoint<'a>,
     client: SyncClient<'a>,
-    body: Bytes,
+    body: B,
     envelope_data: Option<EnvelopeData>,
 }
 
-impl<'a> Request for AttoRequest<'a> {
+impl<'a, B: AsRef<[u8]>> Request for AttoRequest<'a, B> {
     type Body = Bytes;
     type HeaderMap = HeaderMap;
 
@@ -79,7 +79,7 @@ impl<'a> Request for AttoRequest<'a> {
                     zstd::encode_all(self.body.as_ref(), 0)
                         .map_err(|e| RspamdError::HttpError(e.to_string()))?
                 } else {
-                    self.body.to_vec()
+                    self.body.as_ref().to_vec()
                 }
             } else {
                 Vec::new()
@@ -111,7 +111,7 @@ impl<'a> Request for AttoRequest<'a> {
                     if self.client.config.zstd {
                         zstd::encode_all(self.body.as_ref(), 0)?
                     } else {
-                        self.body.to_vec()
+                        self.body.as_ref().to_vec()
                     }
                 } else {
                     Vec::new()
@@ -195,17 +195,17 @@ impl<'a> Request for AttoRequest<'a> {
     }
 }
 
-impl<'a> AttoRequest<'a> {
-    pub fn new<T: Into<Bytes>>(
+impl<'a, B: AsRef<[u8]>> AttoRequest<'a, B> {
+    pub fn new(
         client: SyncClient<'a>,
-        body: T,
+        body: B,
         command: RspamdCommand,
         envelope_data: EnvelopeData,
-    ) -> Result<AttoRequest<'a>, RspamdError> {
+    ) -> Result<AttoRequest<'a, B>, RspamdError> {
         Ok(Self {
             endpoint: RspamdEndpoint::from_command(command),
             client,
-            body: body.into(),
+            body,
             envelope_data: Some(envelope_data),
         })
     }
@@ -228,9 +228,9 @@ impl<'a> AttoRequest<'a> {
 ///    Ok(())
 /// }
 ///
-pub fn scan_sync<T: Into<Bytes>>(
+pub fn scan_sync<B: AsRef<[u8]>>(
     options: &Config,
-    body: T,
+    body: B,
     envelope_data: EnvelopeData,
 ) -> Result<RspamdScanReply, RspamdError> {
     let client = sync_client(options)?;

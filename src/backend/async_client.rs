@@ -54,15 +54,15 @@ pub fn async_client(options: &Config) -> Result<AsyncClient<'_>, RspamdError> {
 }
 
 // Temporary structure for making a request
-pub struct ReqwestRequest<'a> {
+pub struct ReqwestRequest<'a, B> {
     endpoint: RspamdEndpoint<'a>,
     client: AsyncClient<'a>,
-    body: Bytes,
+    body: B,
     envelope_data: Option<EnvelopeData>,
 }
 
 #[maybe_async::maybe_async]
-impl<'a> Request for ReqwestRequest<'a> {
+impl<'a, B: AsRef<[u8]> + Send> Request for ReqwestRequest<'a, B> {
     type Body = Bytes;
     type HeaderMap = reqwest::header::HeaderMap;
 
@@ -108,7 +108,7 @@ impl<'a> Request for ReqwestRequest<'a> {
                     if self.client.config.zstd {
                         zstd::encode_all(self.body.as_ref(), 0)?
                     } else {
-                        self.body.to_vec()
+                        self.body.as_ref().to_vec()
                     }
                 } else {
                     Vec::new()
@@ -132,7 +132,7 @@ impl<'a> Request for ReqwestRequest<'a> {
                         0,
                     )?))
                 } else {
-                    req.body(self.body.clone())
+                    req.body(Bytes::copy_from_slice(self.body.as_ref()))
                 };
             }
 
@@ -200,17 +200,17 @@ impl<'a> Request for ReqwestRequest<'a> {
 }
 
 #[maybe_async::maybe_async]
-impl<'a> ReqwestRequest<'a> {
-    pub async fn new<T: Into<Bytes>>(
+impl<'a, B: AsRef<[u8]> + Send> ReqwestRequest<'a, B> {
+    pub async fn new(
         client: AsyncClient<'a>,
-        body: T,
+        body: B,
         command: RspamdCommand,
         envelope_data: EnvelopeData,
-    ) -> Result<ReqwestRequest<'a>, RspamdError> {
+    ) -> Result<ReqwestRequest<'a, B>, RspamdError> {
         Ok(Self {
             endpoint: RspamdEndpoint::from_command(command),
             client,
-            body: body.into(),
+            body,
             envelope_data: Some(envelope_data),
         })
     }
@@ -237,9 +237,9 @@ impl<'a> ReqwestRequest<'a> {
 /// }
 /// ```
 #[maybe_async::maybe_async]
-pub async fn scan_async<T: Into<Bytes>>(
+pub async fn scan_async<B: AsRef<[u8]> + Send>(
     options: &Config,
-    body: T,
+    body: B,
     envelope_data: EnvelopeData,
 ) -> Result<RspamdScanReply, RspamdError> {
     let client = async_client(options)?;
