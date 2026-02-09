@@ -18,12 +18,12 @@ thiserror = "2.0"
 typed-builder = "0.23"
 reqwest = { version = "0.12", optional = true, features = ["json", "rustls-tls", "zstd"] }
 zstd = "0.13"
-ureq = { version = "3.1", optional = true }
-tokio = { version = "1.48", optional = true, features = ["full"] }
+ureq = { version = "3.2", optional = true }
+tokio = { version = "1.49", optional = true, features = ["full"] }
 maybe-async = "0.2"
 async-trait = "0.1"
-bytes = "1.7.2"
-tokio-stream = "0.1.16"
+bytes = "1.11.1"
+tokio-stream = "0.1.18"
 futures = "0.3.31"
 attohttpc = { version = "0.30", optional = true }
 native-tls = "0.2"
@@ -31,7 +31,7 @@ url = "2.5"
 crypto_box = { version = "0.9", default-features = false, features = ["chacha20", "alloc", "getrandom"] }
 rspamd-base32 = "0.1"
 blake2b_simd = "1.0"
-chacha20 = "0.9"
+chacha20 = "0.10"
 crypto_secretbox = { version = "0.1", default-features = false, features = ["chacha20"] }
 curve25519-dalek = "4.1"
 poly1305 = "0.8"
