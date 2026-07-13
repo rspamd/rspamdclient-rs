@@ -79,7 +79,95 @@ pub fn make_key_header(remote_pk: &str, local_pk: &str) -> Result<String, Rspamd
     Ok(format!("{}={}", hash_b32.as_str(), local_pk))
 }
 
-/// Perform a scalar multiplication with a remote public key and a local secret key.
+/// Precomputed HTTPCrypt state for a fixed destination keypair.
+///
+/// Decoding the base32 peer public key and deriving the short key id used in
+/// the `Key` header depend only on the destination key, so they are done once
+/// at construction and shared by every request. Everything derived from
+/// ephemeral keys (scalarmult, shared secret, nonce) stays per-request.
+pub struct HttpCryptContext {
+    /// Decoded remote public key
+    peer_pk: [u8; 32],
+    /// Base32-encoded blake2b short id of the peer key, the `Key` header prefix
+    key_id_b32: String,
+}
+
+impl HttpCryptContext {
+    /// Parse a base32-encoded remote public key into a reusable context.
+    pub fn new(peer_key_b32: &str) -> Result<Self, RspamdError> {
+        let decoded = decode(peer_key_b32)
+            .map_err(|_| RspamdError::EncryptionError("Base32 decode failed".to_string()))?;
+        let peer_pk: [u8; 32] = decoded.as_slice().try_into().map_err(|_| {
+            RspamdError::EncryptionError("Invalid public key length".to_string())
+        })?;
+        let hash = blake2b(peer_pk.as_slice());
+        let key_id_b32 = encode(&hash.as_bytes()[0..SHORT_KEY_ID_SIZE]);
+        Ok(Self {
+            peer_pk,
+            key_id_b32,
+        })
+    }
+
+    /// Build the `Key` header value for an ephemeral local public key.
+    pub fn key_header(&self, local_pk_b32: &str) -> String {
+        format!("{}={}", self.key_id_b32, local_pk_b32)
+    }
+
+    /// Encrypt a request for the destination this context was built for,
+    /// generating a fresh ephemeral keypair.
+    pub fn encrypt<T, HN, HV>(
+        &self,
+        url: &str,
+        body: &[u8],
+        headers: T,
+    ) -> Result<HTTPCryptEncrypted, RspamdError>
+    where
+        T: IntoIterator<Item = (HN, HV)>,
+        HN: AsRef<[u8]>,
+        HV: AsRef<[u8]>,
+    {
+        let local_sk = SecretKey::generate(&mut OsRng);
+        let local_pk = local_sk.public_key();
+        let extra_size = std::mem::size_of::<<ChaChaBox as AeadCore>::NonceSize>()
+            + std::mem::size_of::<<ChaChaBox as AeadCore>::TagSize>();
+        let mut dest = Vec::with_capacity(body.len() + 128 + extra_size);
+
+        // Fill the inner headers
+        dest.extend_from_slice(b"POST ");
+        dest.extend_from_slice(url.as_bytes());
+        dest.extend_from_slice(b" HTTP/1.1\n");
+        for (k, v) in headers {
+            dest.extend_from_slice(k.as_ref());
+            dest.extend_from_slice(b": ");
+            dest.extend_from_slice(v.as_ref());
+            dest.push(b'\n');
+        }
+        dest.extend_from_slice(format!("Content-Length: {}\n\n", body.len()).as_bytes());
+        dest.extend_from_slice(body.as_ref());
+
+        let (encrypted, nm) = encrypt_inplace(dest.as_slice(), &self.peer_pk, &local_sk)?;
+
+        Ok(HTTPCryptEncrypted {
+            body: encrypted,
+            peer_key: rspamd_base32::encode(local_pk.as_ref()),
+            shared_key: nm,
+        })
+    }
+}
+
+/// Scalar multiplication with an already decoded remote public key.
+pub(crate) fn rspamd_x25519_scalarmult_raw(
+    remote_pk: &[u8; 32],
+    local_sk: &SecretKey,
+) -> Zeroizing<MontgomeryPoint> {
+    // Do manual scalarmult as Rspamd is using it's own way there
+    let e = Scalar::from_bytes_mod_order(clamp_integer(local_sk.to_bytes()));
+    let p = MontgomeryPoint(*remote_pk);
+    Zeroizing::new(e * p)
+}
+
+/// Perform a scalar multiplication with a base32-encoded remote public key and a local secret key.
+#[cfg(test)]
 pub(crate) fn rspamd_x25519_scalarmult(
     remote_pk: &[u8],
     local_sk: &SecretKey,
@@ -88,11 +176,8 @@ pub(crate) fn rspamd_x25519_scalarmult(
         .map_err(|_| RspamdError::EncryptionError("Base32 decode failed".to_string()))?
         .as_slice()
         .try_into()
-        .unwrap();
-    // Do manual scalarmult as Rspamd is using it's own way there
-    let e = Scalar::from_bytes_mod_order(clamp_integer(local_sk.to_bytes()));
-    let p = MontgomeryPoint(remote_pk);
-    Ok(Zeroizing::new(e * p))
+        .map_err(|_| RspamdError::EncryptionError("Invalid public key length".to_string()))?;
+    Ok(rspamd_x25519_scalarmult_raw(&remote_pk, local_sk))
 }
 
 /// Unlike IETF version, Rspamd uses an old suggested way to derive a shared secret - it performs
@@ -105,14 +190,14 @@ pub(crate) fn rspamd_x25519_ecdh(
     Zeroizing::new(hchacha::<U10>(&point.to_bytes().into(), &n0))
 }
 
-/// Encrypt a plaintext with a given peer public key generating an ephemeral keypair.
+/// Encrypt a plaintext with a decoded peer public key and a local secret key.
 fn encrypt_inplace(
     plaintext: &[u8],
-    recipient_public_key: &[u8],
+    recipient_public_key: &[u8; 32],
     local_sk: &SecretKey,
 ) -> Result<(Vec<u8>, RspamdNM), RspamdError> {
     let mut dest = Vec::with_capacity(plaintext.len() + 24 + poly1305::BLOCK_SIZE);
-    let ec_point = rspamd_x25519_scalarmult(recipient_public_key, local_sk)?;
+    let ec_point = rspamd_x25519_scalarmult_raw(recipient_public_key, local_sk);
     let nm = rspamd_x25519_ecdh(ec_point);
 
     let nonce = ChaChaBox::generate_nonce(&mut OsRng);
@@ -140,32 +225,8 @@ where
     HN: AsRef<[u8]>,
     HV: AsRef<[u8]>,
 {
-    let local_sk = SecretKey::generate(&mut OsRng);
-    let local_pk = local_sk.public_key();
-    let extra_size = std::mem::size_of::<<ChaChaBox as AeadCore>::NonceSize>()
-        + std::mem::size_of::<<ChaChaBox as AeadCore>::TagSize>();
-    let mut dest = Vec::with_capacity(body.len() + 128 + extra_size);
-
-    // Fill the inner headers
-    dest.extend_from_slice(b"POST ");
-    dest.extend_from_slice(url.as_bytes());
-    dest.extend_from_slice(b" HTTP/1.1\n");
-    for (k, v) in headers {
-        dest.extend_from_slice(k.as_ref());
-        dest.extend_from_slice(b": ");
-        dest.extend_from_slice(v.as_ref());
-        dest.push(b'\n');
-    }
-    dest.extend_from_slice(format!("Content-Length: {}\n\n", body.len()).as_bytes());
-    dest.extend_from_slice(body.as_ref());
-
-    let (encrypted, nm) = encrypt_inplace(dest.as_slice(), peer_key, &local_sk)?;
-
-    Ok(HTTPCryptEncrypted {
-        body: encrypted,
-        peer_key: rspamd_base32::encode(local_pk.as_ref()),
-        shared_key: nm,
-    })
+    let ctx = HttpCryptContext::new(std::str::from_utf8(peer_key)?)?;
+    ctx.encrypt(url, body, headers)
 }
 
 /// Decrypts body using HTTPCrypt algorithm
@@ -213,5 +274,45 @@ mod tests {
         let point = Zeroizing::new(MontgomeryPoint(EXPECTED_POINT));
         let nm = rspamd_x25519_ecdh(point);
         assert_eq!(nm.as_slice(), &EXPECTED_NM);
+    }
+
+    const PEER_PK_B32: &str = "k4nz984k36xmcynm1hr9kdbn6jhcxf4ggbrb1quay7f88rpm9kay";
+
+    /// The precomputed context must produce the same `Key` header as the
+    /// legacy per-request helper.
+    #[test]
+    fn test_context_key_header_matches_legacy() {
+        let ctx = HttpCryptContext::new(PEER_PK_B32).unwrap();
+        let local_pk = "oqqm9kkt7c1ws638cyf41apar3in1wuyx647gzrx88hhd94ehm3y";
+        assert_eq!(
+            ctx.key_header(local_pk),
+            make_key_header(PEER_PK_B32, local_pk).unwrap()
+        );
+    }
+
+    /// Encrypting through the context and decrypting with the returned shared
+    /// key must round-trip the inner request.
+    #[test]
+    fn test_context_encrypt_decrypt_roundtrip() {
+        let ctx = HttpCryptContext::new(PEER_PK_B32).unwrap();
+        let body = b"test message body";
+        let headers = [("From", "user@example.com")];
+        let encrypted = ctx.encrypt("/checkv2", body, headers).unwrap();
+
+        let mut encrypted_body = encrypted.body;
+        let offset = httpcrypt_decrypt(encrypted_body.as_mut_slice(), encrypted.shared_key)
+            .expect("decryption with the shared key must succeed");
+        let plaintext = &encrypted_body[offset..];
+        let plaintext_str = std::str::from_utf8(plaintext).unwrap();
+        assert!(plaintext_str.starts_with("POST /checkv2 HTTP/1.1\n"));
+        assert!(plaintext_str.contains("From: user@example.com\n"));
+        assert!(plaintext_str.ends_with("test message body"));
+    }
+
+    #[test]
+    fn test_context_rejects_bad_key() {
+        assert!(HttpCryptContext::new("not-base32!").is_err());
+        // Valid base32 but wrong length
+        assert!(HttpCryptContext::new("k4nz984k36xmcynm").is_err());
     }
 }

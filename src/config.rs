@@ -6,10 +6,11 @@
 
 use std::collections::HashMap;
 use std::iter::IntoIterator;
+use std::time::Duration;
 use typed_builder::TypedBuilder;
 
 /// Custom TLS settings for the Rspamd client
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TlsSettings {
     /// Path to the TLS certificate file
     pub cert_path: String,
@@ -22,7 +23,7 @@ pub struct TlsSettings {
 }
 
 /// Proxy configuration for the Rspamd client
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProxyConfig {
     /// Proxy server URL
     pub proxy_url: String,
@@ -144,7 +145,10 @@ mod tests {
 }
 
 /// Configuration for Rspamd client
-#[derive(TypedBuilder, Debug, PartialEq)]
+///
+/// Implements `Clone`, `Eq` and `Hash`, so it can be used directly as a key
+/// in caches of persistent clients (e.g. an LRU of `RspamdAsyncClient`).
+#[derive(TypedBuilder, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Config {
     /// Base URL of Rspamd server
     pub base_url: String,
@@ -154,8 +158,8 @@ pub struct Config {
     pub password: Option<String>,
 
     /// Timeout duration for requests
-    #[builder(default = 30.0)]
-    pub timeout: f64,
+    #[builder(default = Duration::from_secs(30))]
+    pub timeout: Duration,
 
     /// Number of retries for requests
     #[builder(default = 1)]

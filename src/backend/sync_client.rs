@@ -2,59 +2,176 @@ use crate::backend::traits::*;
 use crate::config::{Config, EnvelopeData};
 use crate::error::RspamdError;
 use crate::protocol::commands::{RspamdCommand, RspamdEndpoint};
-use crate::protocol::encryption::{httpcrypt_decrypt, httpcrypt_encrypt, make_key_header};
-use crate::protocol::RspamdScanReply;
+use crate::protocol::encryption::{httpcrypt_decrypt, HttpCryptContext};
+use crate::protocol::scan::parse_scan_reply;
+use crate::protocol::{RspamdLearnReply, RspamdScanReply};
 use attohttpc::header::{HeaderMap, HeaderName, HeaderValue};
 use attohttpc::{self, ProxySettingsBuilder, Session};
 use bytes::Bytes;
 use std::fs;
 use std::str::FromStr;
-use std::time::Duration;
+use std::sync::Arc;
 use url::Url;
 
-pub struct SyncClient<'a> {
-    config: &'a Config,
+/// Persistent synchronous Rspamd client.
+///
+/// Owns the underlying `attohttpc::Session`, so per-call setup (TLS root
+/// certificates, proxy settings, HTTPCrypt peer key parsing) is done once at
+/// construction. Note that `attohttpc` does not pool connections, so unlike
+/// [`RspamdAsyncClient`](crate::RspamdAsyncClient) each request still opens a
+/// fresh TCP connection.
+///
+/// Cheap to clone (the configuration is shared through an `Arc`);
+/// `Send + Sync + 'static`, so it can be cached and shared between threads.
+#[derive(Clone)]
+pub struct RspamdSyncClient {
     inner: Session,
+    config: Arc<Config>,
+    crypt: Option<Arc<HttpCryptContext>>,
 }
 
-pub fn sync_client(options: &Config) -> Result<SyncClient<'_>, RspamdError> {
-    let mut client = Session::new();
-    client.timeout(Duration::from_secs_f64(options.timeout));
+impl RspamdSyncClient {
+    /// Create a persistent client from a configuration.
+    pub fn new(config: Config) -> Result<Self, RspamdError> {
+        let mut client = Session::new();
+        client.timeout(config.timeout);
 
-    if let Some(ref proxy) = options.proxy_config {
-        let proxy = ProxySettingsBuilder::new()
-            .http_proxy(Url::from_str(&proxy.proxy_url)?)
-            .build();
-        client.proxy_settings(proxy);
-    }
-
-    if let Some(ref tls) = options.tls_settings {
-        if let Some(ca_path) = tls.ca_path.as_ref() {
-            let ca_data = fs::read(
-                fs::canonicalize(ca_path.as_str())
-                    .map_err(|e| RspamdError::ConfigError(e.to_string()))?,
-            )
-            .map_err(|e| RspamdError::ConfigError(e.to_string()))?;
-            let ca_cert = native_tls::Certificate::from_pem(&ca_data)
-                .map_err(|e| RspamdError::HttpError(e.to_string()))?;
-            client.add_root_certificate(ca_cert);
+        if let Some(ref proxy) = config.proxy_config {
+            let proxy = ProxySettingsBuilder::new()
+                .http_proxy(Url::from_str(&proxy.proxy_url)?)
+                .build();
+            client.proxy_settings(proxy);
         }
+
+        if let Some(ref tls) = config.tls_settings {
+            if let Some(ca_path) = tls.ca_path.as_ref() {
+                let ca_data = fs::read(
+                    fs::canonicalize(ca_path.as_str())
+                        .map_err(|e| RspamdError::ConfigError(e.to_string()))?,
+                )
+                .map_err(|e| RspamdError::ConfigError(e.to_string()))?;
+                let ca_cert = native_tls::Certificate::from_pem(&ca_data)
+                    .map_err(|e| RspamdError::HttpError(e.to_string()))?;
+                client.add_root_certificate(ca_cert);
+            }
+        }
+
+        let crypt = config
+            .encryption_key
+            .as_deref()
+            .map(HttpCryptContext::new)
+            .transpose()?
+            .map(Arc::new);
+
+        Ok(Self {
+            inner: client,
+            config: Arc::new(config),
+            crypt,
+        })
     }
 
-    Ok(SyncClient {
-        inner: client,
-        config: options,
-    })
+    /// The configuration this client was built from.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Scan an email, returning the parsed scan reply.
+    pub fn scan<B: AsRef<[u8]>>(
+        &self,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdScanReply, RspamdError> {
+        let (headers, body) = self.execute(RspamdCommand::Scan, body, envelope_data)?;
+
+        // Check for Message-Offset header to handle body_block feature
+        let message_offset = headers
+            .get("Message-Offset")
+            .map(|v| {
+                v.to_str().map_err(|e| {
+                    RspamdError::HttpError(format!("Invalid Message-Offset header: {}", e))
+                })
+            })
+            .transpose()?;
+        parse_scan_reply(message_offset, body.as_ref())
+    }
+
+    /// Learn an email as spam (requires the controller endpoint and password).
+    pub fn learn_spam<B: AsRef<[u8]>>(
+        &self,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdLearnReply, RspamdError> {
+        self.learn(RspamdCommand::Learnspam, body, envelope_data)
+    }
+
+    /// Learn an email as ham (requires the controller endpoint and password).
+    pub fn learn_ham<B: AsRef<[u8]>>(
+        &self,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdLearnReply, RspamdError> {
+        self.learn(RspamdCommand::Learnham, body, envelope_data)
+    }
+
+    /// Add an email to fuzzy storage; pass `Flag`/`Weight` via
+    /// `EnvelopeData::additional_headers`.
+    pub fn fuzzy_add<B: AsRef<[u8]>>(
+        &self,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdLearnReply, RspamdError> {
+        self.learn(RspamdCommand::FuzzyAdd, body, envelope_data)
+    }
+
+    /// Remove an email from fuzzy storage; pass `Flag` via
+    /// `EnvelopeData::additional_headers`.
+    pub fn fuzzy_del<B: AsRef<[u8]>>(
+        &self,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdLearnReply, RspamdError> {
+        self.learn(RspamdCommand::FuzzyDel, body, envelope_data)
+    }
+
+    fn learn<B: AsRef<[u8]>>(
+        &self,
+        command: RspamdCommand,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdLearnReply, RspamdError> {
+        let (_headers, body) = self.execute(command, body, envelope_data)?;
+        Ok(serde_json::from_slice(body.as_ref())?)
+    }
+
+    fn execute<B: AsRef<[u8]>>(
+        &self,
+        command: RspamdCommand,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<(HeaderMap, Bytes), RspamdError> {
+        let request = AttoRequest::new(self.clone(), body, command, envelope_data)?;
+        request.response()
+    }
 }
 
-pub struct AttoRequest<'a, B> {
-    endpoint: RspamdEndpoint<'a>,
-    client: SyncClient<'a>,
+#[deprecated(since = "0.7.0", note = "use RspamdSyncClient::new instead")]
+pub fn sync_client(options: &Config) -> Result<RspamdSyncClient, RspamdError> {
+    RspamdSyncClient::new(options.clone())
+}
+
+/// Deprecated alias kept for backwards compatibility; the client no longer
+/// borrows the configuration, so the lifetime parameter is ignored.
+#[deprecated(since = "0.7.0", note = "use RspamdSyncClient instead")]
+pub type SyncClient<'a> = RspamdSyncClient;
+
+pub struct AttoRequest<B> {
+    endpoint: RspamdEndpoint<'static>,
+    client: RspamdSyncClient,
     body: B,
     envelope_data: Option<EnvelopeData>,
 }
 
-impl<'a, B: AsRef<[u8]>> Request for AttoRequest<'a, B> {
+impl<B: AsRef<[u8]>> Request for AttoRequest<B> {
     type Body = Bytes;
     type HeaderMap = HeaderMap;
 
@@ -106,7 +223,7 @@ impl<'a, B: AsRef<[u8]>> Request for AttoRequest<'a, B> {
                 req = req.header("Compression", "zstd");
             }
 
-            if let Some(ref encryption_key) = self.client.config.encryption_key {
+            if let Some(ref crypt) = self.client.crypt {
                 let mut inner_req = req;
                 let body = if need_body {
                     if self.client.config.zstd {
@@ -117,20 +234,17 @@ impl<'a, B: AsRef<[u8]>> Request for AttoRequest<'a, B> {
                 } else {
                     Vec::new()
                 };
-                let encrypted = httpcrypt_encrypt(
+                let encrypted = crypt.encrypt(
                     url.path(),
                     body.as_slice(),
                     inner_req.inspect().headers(),
-                    encryption_key.as_bytes(),
                 )?;
                 req = self.client.inner.post(url).bytes(encrypted.body);
-                let key_header =
-                    make_key_header(encryption_key.as_str(), encrypted.peer_key.as_str())?;
-                req = req.header("Key", key_header);
+                req = req.header("Key", crypt.key_header(encrypted.peer_key.as_str()));
                 maybe_sk = Some(encrypted.shared_key);
             }
 
-            req = req.timeout(Duration::from_secs_f64(self.client.config.timeout));
+            req = req.timeout(self.client.config.timeout);
 
             match req.send() {
                 Ok(v) => break Ok(v),
@@ -139,7 +253,7 @@ impl<'a, B: AsRef<[u8]>> Request for AttoRequest<'a, B> {
                         break Err(RspamdError::HttpError(e.to_string()));
                     }
                     retry_cnt -= 1;
-                    std::thread::sleep(Duration::from_secs_f64(self.client.config.timeout));
+                    std::thread::sleep(self.client.config.timeout);
                     continue;
                 }
             }
@@ -196,13 +310,13 @@ impl<'a, B: AsRef<[u8]>> Request for AttoRequest<'a, B> {
     }
 }
 
-impl<'a, B: AsRef<[u8]>> AttoRequest<'a, B> {
+impl<B: AsRef<[u8]>> AttoRequest<B> {
     pub fn new(
-        client: SyncClient<'a>,
+        client: RspamdSyncClient,
         body: B,
         command: RspamdCommand,
         envelope_data: EnvelopeData,
-    ) -> Result<AttoRequest<'a, B>, RspamdError> {
+    ) -> Result<AttoRequest<B>, RspamdError> {
         Ok(Self {
             endpoint: RspamdEndpoint::from_command(command),
             client,
@@ -213,8 +327,12 @@ impl<'a, B: AsRef<[u8]>> AttoRequest<'a, B> {
 }
 
 /// Synchronously scan an email
+///
+/// This is a one-shot helper: it builds a new client on every call. Prefer
+/// [`RspamdSyncClient`] to avoid re-doing configuration and key setup per scan.
+///
 /// Example:
-/// ```rust
+/// ```rust,no_run
 /// use rspamd_client::config::Config;
 /// use rspamd_client::scan_sync;
 /// use rspamd_client::error::RspamdError;
@@ -228,42 +346,13 @@ impl<'a, B: AsRef<[u8]>> AttoRequest<'a, B> {
 ///    let response = scan_sync(&config, email, envelope)?;
 ///    Ok(())
 /// }
-///
+/// ```
+#[deprecated(since = "0.7.0", note = "use RspamdSyncClient for a persistent client")]
 pub fn scan_sync<B: AsRef<[u8]>>(
     options: &Config,
     body: B,
     envelope_data: EnvelopeData,
 ) -> Result<RspamdScanReply, RspamdError> {
-    let client = sync_client(options)?;
-    let request = AttoRequest::new(client, body, RspamdCommand::Scan, envelope_data)?;
-    let (headers, body) = request
-        .response()
-        .map_err(|e| RspamdError::HttpError(e.to_string()))?;
-
-    // Check for Message-Offset header to handle body_block feature
-    let response = if let Some(offset_header) = headers.get("Message-Offset") {
-        let offset = offset_header
-            .to_str()
-            .map_err(|e| RspamdError::HttpError(format!("Invalid Message-Offset header: {}", e)))?
-            .parse::<usize>()
-            .map_err(|e| RspamdError::HttpError(format!("Invalid Message-Offset value: {}", e)))?;
-
-        if offset < body.len() {
-            // Split body into JSON part and rewritten body part
-            let json_part = &body[..offset];
-            let body_part = &body[offset..];
-
-            let mut response = serde_json::from_slice::<RspamdScanReply>(json_part)?;
-            response.rewritten_body = Some(body_part.to_vec());
-            response
-        } else {
-            // Offset is out of bounds, parse entire body as JSON
-            serde_json::from_slice::<RspamdScanReply>(body.as_ref())?
-        }
-    } else {
-        // No Message-Offset header, parse entire body as JSON
-        serde_json::from_slice::<RspamdScanReply>(body.as_ref())?
-    };
-
-    Ok(response)
+    let client = RspamdSyncClient::new(options.clone())?;
+    client.scan(body, envelope_data)
 }

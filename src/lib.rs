@@ -8,6 +8,7 @@
 //!
 //! - **Sync**: Synchronous client using `attohttpc`.
 //! - **Async**: Asynchronous client using `reqwest`.
+//! - Persistent clients with connection pooling (async backend).
 //! - Easily configurable with support for proxy, encryption, TLS and ZSTD compression.
 //! - Supports scanning emails for spam scores and other metrics.
 
@@ -24,37 +25,43 @@ pub mod protocol;
 
 pub mod backend;
 
-#[cfg(feature = "sync")]
-pub use backend::sync_client::scan_sync;
+pub use config::{Config, EnvelopeData, ProxyConfig, TlsSettings};
+pub use protocol::{RspamdLearnReply, RspamdScanReply};
+
 /// ### Synchronous Client
 ///
-/// This example demonstrates how to scan an email using the synchronous client.
+/// This example demonstrates how to scan emails using the persistent
+/// synchronous client.
 ///
 /// ```rust,no_run
-/// use rspamd_client::{config, scan_sync};
+/// use rspamd_client::{config, RspamdSyncClient};
 ///
 /// let config = config::Config::builder()
 ///     .base_url("http://localhost:11333".to_string())
 ///     .build();
+/// let client = RspamdSyncClient::new(config).expect("cannot create client");
 /// let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
 ///
-/// match scan_sync(&config, email, Default::default()) {
+/// match client.scan(email, Default::default()) {
 ///     Ok(response) => println!("Scan result: {:?}", response),
 ///     Err(e) => eprintln!("Error scanning email: {}", e),
 /// }
 /// ```
-///
 #[cfg(feature = "sync")]
-pub use backend::sync_client::SyncClient;
+pub use backend::sync_client::RspamdSyncClient;
 
-#[cfg(feature = "async")]
-pub use backend::async_client::scan_async;
+#[cfg(feature = "sync")]
+#[allow(deprecated)]
+pub use backend::sync_client::{scan_sync, sync_client, SyncClient};
+
 /// ### Asynchronous Client
 ///
-/// This example demonstrates how to scan an email using the asynchronous client.
+/// This example demonstrates how to scan emails using the persistent
+/// asynchronous client. The underlying connection is pooled and reused
+/// across calls.
 ///
 /// ```rust,no_run
-/// use rspamd_client::{config, scan_async};
+/// use rspamd_client::{config, RspamdAsyncClient};
 /// # use tokio;
 ///
 /// # #[tokio::main]
@@ -62,13 +69,18 @@ pub use backend::async_client::scan_async;
 /// let config = config::Config::builder()
 ///     .base_url("http://localhost:11333".to_string())
 ///     .build();
+/// let client = RspamdAsyncClient::new(config).expect("cannot create client");
 /// let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
 ///
-/// match scan_async(&config, email, Default::default()).await {
+/// match client.scan(email, Default::default()).await {
 ///     Ok(response) => println!("Scan result: {:?}", response),
 ///     Err(e) => eprintln!("Error scanning email: {}", e),
 /// }
 /// # }
 /// ```
 #[cfg(feature = "async")]
-pub use backend::async_client::AsyncClient;
+pub use backend::async_client::RspamdAsyncClient;
+
+#[cfg(feature = "async")]
+#[allow(deprecated)]
+pub use backend::async_client::{async_client, scan_async, AsyncClient};

@@ -5,6 +5,8 @@ pub enum RspamdCommand {
     Scan,
     Learnspam,
     Learnham,
+    FuzzyAdd,
+    FuzzyDel,
 }
 
 /// Ephemeral endpoint representation
@@ -31,6 +33,16 @@ impl<'a> RspamdEndpoint<'a> {
             },
             RspamdCommand::Learnham => Self {
                 url: "/learnham",
+                command,
+                need_body: true,
+            },
+            RspamdCommand::FuzzyAdd => Self {
+                url: "/fuzzyadd",
+                command,
+                need_body: true,
+            },
+            RspamdCommand::FuzzyDel => Self {
+                url: "/fuzzydel",
                 command,
                 need_body: true,
             },

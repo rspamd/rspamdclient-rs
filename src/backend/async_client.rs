@@ -2,66 +2,204 @@ use crate::backend::traits::*;
 use crate::config::{Config, EnvelopeData};
 use crate::error::RspamdError;
 use crate::protocol::commands::{RspamdCommand, RspamdEndpoint};
-use crate::protocol::encryption::{httpcrypt_decrypt, httpcrypt_encrypt, make_key_header};
-use crate::protocol::RspamdScanReply;
+use crate::protocol::encryption::{httpcrypt_decrypt, HttpCryptContext};
+use crate::protocol::scan::parse_scan_reply;
+use crate::protocol::{RspamdLearnReply, RspamdScanReply};
 use bytes::{Bytes, BytesMut};
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::Client;
 use std::str::FromStr;
-use std::time::Duration;
+use std::sync::Arc;
 use url::Url;
 use zstd::zstd_safe::WriteBuf;
 
-pub struct AsyncClient<'a> {
-    config: &'a Config,
+/// Persistent asynchronous Rspamd client.
+///
+/// Owns the underlying `reqwest::Client`, so TCP (and TLS, when enabled)
+/// connections are pooled and reused across calls, unlike the one-shot
+/// [`scan_async`] wrapper which pays a fresh connection setup on every call.
+///
+/// Cheap to clone (`reqwest::Client` is internally reference-counted and the
+/// configuration is shared through an `Arc`); `Send + Sync + 'static`, so it
+/// is suitable for stashing in a static or an LRU cache keyed by [`Config`].
+///
+/// ```rust,no_run
+/// use rspamd_client::config::Config;
+/// use rspamd_client::RspamdAsyncClient;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), rspamd_client::error::RspamdError> {
+/// let config = Config::builder()
+///     .base_url("http://localhost:11333".to_string())
+///     .build();
+/// let client = RspamdAsyncClient::new(config)?;
+/// for email in ["first message", "second message"] {
+///     let reply = client.scan(email, Default::default()).await?;
+///     println!("action: {}", reply.action);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct RspamdAsyncClient {
     inner: Client,
+    config: Arc<Config>,
+    crypt: Option<Arc<HttpCryptContext>>,
+}
+
+impl RspamdAsyncClient {
+    /// Create a persistent client from a configuration.
+    pub fn new(config: Config) -> Result<Self, RspamdError> {
+        let client = Client::builder().timeout(config.timeout);
+
+        let client = if let Some(ref proxy) = config.proxy_config {
+            let proxy = reqwest::Proxy::all(proxy.proxy_url.clone())
+                .map_err(|e| RspamdError::HttpError(e.to_string()))?;
+            client.proxy(proxy)
+        } else {
+            client
+        };
+        let client = if let Some(ref tls) = config.tls_settings {
+            if let Some(ca_path) = tls.ca_path.as_ref() {
+                client.add_root_certificate(
+                    reqwest::Certificate::from_pem(
+                        &std::fs::read(std::fs::canonicalize(ca_path.as_str()).unwrap())
+                            .map_err(|e| RspamdError::ConfigError(e.to_string()))?,
+                    )
+                    .map_err(|e| RspamdError::HttpError(e.to_string()))?,
+                )
+            } else {
+                client
+            }
+        } else {
+            client
+        };
+
+        let crypt = config
+            .encryption_key
+            .as_deref()
+            .map(HttpCryptContext::new)
+            .transpose()?
+            .map(Arc::new);
+
+        Ok(Self {
+            inner: client
+                .build()
+                .map_err(|e| RspamdError::HttpError(e.to_string()))?,
+            config: Arc::new(config),
+            crypt,
+        })
+    }
+
+    /// The configuration this client was built from.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Scan an email, returning the parsed scan reply.
+    pub async fn scan<B: AsRef<[u8]> + Send>(
+        &self,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdScanReply, RspamdError> {
+        let (headers, body) = self.execute(RspamdCommand::Scan, body, envelope_data).await?;
+
+        // Check for Message-Offset header to handle body_block feature
+        let message_offset = headers
+            .get("Message-Offset")
+            .map(|v| {
+                v.to_str().map_err(|e| {
+                    RspamdError::HttpError(format!("Invalid Message-Offset header: {}", e))
+                })
+            })
+            .transpose()?;
+        parse_scan_reply(message_offset, body.as_ref())
+    }
+
+    /// Learn an email as spam (requires the controller endpoint and password).
+    pub async fn learn_spam<B: AsRef<[u8]> + Send>(
+        &self,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdLearnReply, RspamdError> {
+        self.learn(RspamdCommand::Learnspam, body, envelope_data)
+            .await
+    }
+
+    /// Learn an email as ham (requires the controller endpoint and password).
+    pub async fn learn_ham<B: AsRef<[u8]> + Send>(
+        &self,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdLearnReply, RspamdError> {
+        self.learn(RspamdCommand::Learnham, body, envelope_data)
+            .await
+    }
+
+    /// Add an email to fuzzy storage; pass `Flag`/`Weight` via
+    /// `EnvelopeData::additional_headers`.
+    pub async fn fuzzy_add<B: AsRef<[u8]> + Send>(
+        &self,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdLearnReply, RspamdError> {
+        self.learn(RspamdCommand::FuzzyAdd, body, envelope_data)
+            .await
+    }
+
+    /// Remove an email from fuzzy storage; pass `Flag` via
+    /// `EnvelopeData::additional_headers`.
+    pub async fn fuzzy_del<B: AsRef<[u8]> + Send>(
+        &self,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdLearnReply, RspamdError> {
+        self.learn(RspamdCommand::FuzzyDel, body, envelope_data)
+            .await
+    }
+
+    async fn learn<B: AsRef<[u8]> + Send>(
+        &self,
+        command: RspamdCommand,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<RspamdLearnReply, RspamdError> {
+        let (_headers, body) = self.execute(command, body, envelope_data).await?;
+        Ok(serde_json::from_slice(body.as_ref())?)
+    }
+
+    async fn execute<B: AsRef<[u8]> + Send>(
+        &self,
+        command: RspamdCommand,
+        body: B,
+        envelope_data: EnvelopeData,
+    ) -> Result<(reqwest::header::HeaderMap, Bytes), RspamdError> {
+        let request = ReqwestRequest::new(self.clone(), body, command, envelope_data).await?;
+        request.response().await
+    }
 }
 
 #[cfg(feature = "async")]
-pub fn async_client(options: &Config) -> Result<AsyncClient<'_>, RspamdError> {
-    let client = Client::builder().timeout(Duration::from_secs_f64(options.timeout));
-
-    let client = if let Some(ref proxy) = options.proxy_config {
-        let proxy = reqwest::Proxy::all(proxy.proxy_url.clone())
-            .map_err(|e| RspamdError::HttpError(e.to_string()))?;
-        client.proxy(proxy)
-    } else {
-        client
-    };
-    let client = if let Some(ref tls) = options.tls_settings {
-        if let Some(ca_path) = tls.ca_path.as_ref() {
-            client.add_root_certificate(
-                reqwest::Certificate::from_pem(
-                    &std::fs::read(std::fs::canonicalize(ca_path.as_str()).unwrap())
-                        .map_err(|e| RspamdError::ConfigError(e.to_string()))?,
-                )
-                .map_err(|e| RspamdError::HttpError(e.to_string()))?,
-            )
-        } else {
-            client
-        }
-    } else {
-        client
-    };
-
-    Ok(AsyncClient {
-        inner: client
-            .build()
-            .map_err(|e| RspamdError::HttpError(e.to_string()))?,
-        config: options,
-    })
+#[deprecated(since = "0.7.0", note = "use RspamdAsyncClient::new for connection pooling")]
+pub fn async_client(options: &Config) -> Result<RspamdAsyncClient, RspamdError> {
+    RspamdAsyncClient::new(options.clone())
 }
 
+/// Deprecated alias kept for backwards compatibility; the client no longer
+/// borrows the configuration, so the lifetime parameter is ignored.
+#[deprecated(since = "0.7.0", note = "use RspamdAsyncClient instead")]
+pub type AsyncClient<'a> = RspamdAsyncClient;
+
 // Temporary structure for making a request
-pub struct ReqwestRequest<'a, B> {
-    endpoint: RspamdEndpoint<'a>,
-    client: AsyncClient<'a>,
+pub struct ReqwestRequest<B> {
+    endpoint: RspamdEndpoint<'static>,
+    client: RspamdAsyncClient,
     body: B,
     envelope_data: Option<EnvelopeData>,
 }
 
 #[maybe_async::maybe_async]
-impl<'a, B: AsRef<[u8]> + Send> Request for ReqwestRequest<'a, B> {
+impl<B: AsRef<[u8]> + Send> Request for ReqwestRequest<B> {
     type Body = Bytes;
     type HeaderMap = reqwest::header::HeaderMap;
 
@@ -99,7 +237,7 @@ impl<'a, B: AsRef<[u8]> + Send> Request for ReqwestRequest<'a, B> {
                 req = req.header(k, v);
             }
 
-            if let Some(ref encryption_key) = self.client.config.encryption_key {
+            if let Some(ref crypt) = self.client.crypt {
                 let inner_req = req
                     .build()
                     .map_err(|e| RspamdError::HttpError(e.to_string()))?;
@@ -112,16 +250,9 @@ impl<'a, B: AsRef<[u8]> + Send> Request for ReqwestRequest<'a, B> {
                 } else {
                     Vec::new()
                 };
-                let encrypted = httpcrypt_encrypt(
-                    url.path(),
-                    body.as_slice(),
-                    inner_req.headers(),
-                    encryption_key.as_bytes(),
-                )?;
+                let encrypted = crypt.encrypt(url.path(), body.as_slice(), inner_req.headers())?;
                 req = self.client.inner.request(reqwest::Method::POST, url);
-                let key_header =
-                    make_key_header(encryption_key.as_str(), encrypted.peer_key.as_str())?;
-                req = req.header("Key", key_header);
+                req = req.header("Key", crypt.key_header(encrypted.peer_key.as_str()));
                 req = req.body(encrypted.body);
                 maybe_sk = Some(encrypted.shared_key);
             } else if need_body {
@@ -135,7 +266,7 @@ impl<'a, B: AsRef<[u8]> + Send> Request for ReqwestRequest<'a, B> {
                 };
             }
 
-            let req = req.timeout(Duration::from_secs_f64(self.client.config.timeout));
+            let req = req.timeout(self.client.config.timeout);
             let req = req
                 .build()
                 .map_err(|e| RspamdError::HttpError(e.to_string()))?;
@@ -147,8 +278,7 @@ impl<'a, B: AsRef<[u8]> + Send> Request for ReqwestRequest<'a, B> {
                         break Err(e);
                     }
                     retry_cnt -= 1;
-                    let delay = Duration::from_secs_f64(self.client.config.timeout);
-                    tokio::time::sleep(delay).await;
+                    tokio::time::sleep(self.client.config.timeout).await;
                     continue;
                 }
             };
@@ -199,13 +329,13 @@ impl<'a, B: AsRef<[u8]> + Send> Request for ReqwestRequest<'a, B> {
 }
 
 #[maybe_async::maybe_async]
-impl<'a, B: AsRef<[u8]> + Send> ReqwestRequest<'a, B> {
+impl<B: AsRef<[u8]> + Send> ReqwestRequest<B> {
     pub async fn new(
-        client: AsyncClient<'a>,
+        client: RspamdAsyncClient,
         body: B,
         command: RspamdCommand,
         envelope_data: EnvelopeData,
-    ) -> Result<ReqwestRequest<'a, B>, RspamdError> {
+    ) -> Result<ReqwestRequest<B>, RspamdError> {
         Ok(Self {
             endpoint: RspamdEndpoint::from_command(command),
             client,
@@ -216,13 +346,16 @@ impl<'a, B: AsRef<[u8]> + Send> ReqwestRequest<'a, B> {
 }
 
 /// Scan an email asynchronously, returning the parsed reply or error.
+///
+/// This is a one-shot helper: it builds a new client (and therefore a new
+/// connection) on every call. Prefer [`RspamdAsyncClient`] to reuse
+/// connections across scans.
+///
 /// Example:
-/// ```rust
+/// ```rust,no_run
 /// use rspamd_client::config::Config;
 /// use rspamd_client::scan_async;
 /// use rspamd_client::error::RspamdError;
-/// use bytes::Bytes;
-/// use std::str::FromStr;
 ///
 ///	#[tokio::main]
 /// async fn main() -> Result<(), RspamdError> {
@@ -235,43 +368,13 @@ impl<'a, B: AsRef<[u8]> + Send> ReqwestRequest<'a, B> {
 /// 	Ok(())
 /// }
 /// ```
+#[deprecated(since = "0.7.0", note = "use RspamdAsyncClient for connection pooling")]
 #[maybe_async::maybe_async]
 pub async fn scan_async<B: AsRef<[u8]> + Send>(
     options: &Config,
     body: B,
     envelope_data: EnvelopeData,
 ) -> Result<RspamdScanReply, RspamdError> {
-    let client = async_client(options)?;
-    let request = ReqwestRequest::new(client, body, RspamdCommand::Scan, envelope_data).await?;
-    let (headers, body) = request
-        .response()
-        .await
-        .map_err(|e| RspamdError::HttpError(e.to_string()))?;
-
-    // Check for Message-Offset header to handle body_block feature
-    let response = if let Some(offset_header) = headers.get("Message-Offset") {
-        let offset = offset_header
-            .to_str()
-            .map_err(|e| RspamdError::HttpError(format!("Invalid Message-Offset header: {}", e)))?
-            .parse::<usize>()
-            .map_err(|e| RspamdError::HttpError(format!("Invalid Message-Offset value: {}", e)))?;
-
-        if offset < body.len() {
-            // Split body into JSON part and rewritten body part
-            let json_part = &body[..offset];
-            let body_part = &body[offset..];
-
-            let mut response = serde_json::from_slice::<RspamdScanReply>(json_part)?;
-            response.rewritten_body = Some(body_part.to_vec());
-            response
-        } else {
-            // Offset is out of bounds, parse entire body as JSON
-            serde_json::from_slice::<RspamdScanReply>(body.as_ref())?
-        }
-    } else {
-        // No Message-Offset header, parse entire body as JSON
-        serde_json::from_slice::<RspamdScanReply>(body.as_ref())?
-    };
-
-    Ok(response)
+    let client = RspamdAsyncClient::new(options.clone())?;
+    client.scan(body, envelope_data).await
 }

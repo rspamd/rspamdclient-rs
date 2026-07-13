@@ -1,29 +1,12 @@
+//! Integration tests requiring a running Rspamd instance (see TESTING.md).
+
 #[cfg(test)]
 mod tests {
     use rspamd_client::config::{Config, EnvelopeData};
-    #[cfg(feature = "async")]
-    use rspamd_client::scan_async;
-    #[cfg(feature = "sync")]
-    use rspamd_client::scan_sync;
 
-    #[cfg(feature = "sync")]
-    #[test]
-    fn test_sync_process() {
-        let config = Config::builder()
-            .base_url("http://localhost:11333".to_string())
-            .encryption_key("k4nz984k36xmcynm1hr9kdbn6jhcxf4ggbrb1quay7f88rpm9kay".to_string())
-            .build();
-        let envelope = EnvelopeData::builder()
-            .from("тест@example.com".to_string())
-            .build();
-        let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
-        let response = scan_sync(&config, email, envelope).unwrap();
-        assert!(!response.symbols.is_empty());
-    }
+    const EMAIL: &str = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
 
-    #[cfg(feature = "async")]
-    #[tokio::test]
-    async fn test_async_encrypted_process() {
+    fn encrypted_config() -> Config {
         // Rspamd config side:
         // keypair {
         //     privkey = "oqqm9kkt7c1ws638cyf41apar3in1wuyx647gzrx88hhd94ehm3y";
@@ -33,15 +16,55 @@ mod tests {
         //     algorithm = "curve25519";
         //     encoding = "base32";
         // }
-        let config = Config::builder()
+        Config::builder()
             .base_url("http://localhost:11333".to_string())
             .encryption_key("k4nz984k36xmcynm1hr9kdbn6jhcxf4ggbrb1quay7f88rpm9kay".to_string())
-            .build();
-        let envelope = EnvelopeData::builder()
+            .build()
+    }
+
+    fn envelope() -> EnvelopeData {
+        EnvelopeData::builder()
             .from("тест@example.com".to_string())
-            .build();
-        let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
-        let response = scan_async(&config, email, envelope).await.unwrap();
+            .build()
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn test_sync_process() {
+        let client = rspamd_client::RspamdSyncClient::new(encrypted_config()).unwrap();
+        // One client, several sequential scans
+        for _ in 0..3 {
+            let response = client.scan(EMAIL, envelope()).unwrap();
+            assert!(!response.symbols.is_empty());
+        }
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn test_sync_one_shot_wrapper() {
+        #[allow(deprecated)]
+        let response = rspamd_client::scan_sync(&encrypted_config(), EMAIL, envelope()).unwrap();
+        assert!(!response.symbols.is_empty());
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_async_encrypted_process() {
+        let client = rspamd_client::RspamdAsyncClient::new(encrypted_config()).unwrap();
+        // One client, several sequential scans over a pooled connection
+        for _ in 0..3 {
+            let response = client.scan(EMAIL, envelope()).await.unwrap();
+            assert!(!response.symbols.is_empty());
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_async_one_shot_wrapper() {
+        #[allow(deprecated)]
+        let response = rspamd_client::scan_async(&encrypted_config(), EMAIL, envelope())
+            .await
+            .unwrap();
         assert!(!response.symbols.is_empty());
     }
 
@@ -57,8 +80,9 @@ mod tests {
             .from("user@example.com".to_string())
             .file_path("/tmp/test_email.eml".to_string())
             .build();
+        let client = rspamd_client::RspamdSyncClient::new(config).unwrap();
         // Body is not transmitted when file_path is set, but still required by API
-        let _response = scan_sync(&config, "", envelope).unwrap();
+        let _response = client.scan("", envelope).unwrap();
         // Test passes if no error is returned
     }
 
@@ -74,8 +98,9 @@ mod tests {
             .from("user@example.com".to_string())
             .file_path("/tmp/test_email.eml".to_string())
             .build();
+        let client = rspamd_client::RspamdAsyncClient::new(config).unwrap();
         // Body is not transmitted when file_path is set, but still required by API
-        let _response = scan_async(&config, "", envelope).await.unwrap();
+        let _response = client.scan("", envelope).await.unwrap();
         // Test passes if no error is returned
     }
 }

@@ -1,3 +1,4 @@
+use crate::error::RspamdError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -82,4 +83,36 @@ pub struct MailHeader {
     pub value: String,
     #[serde(default)]
     pub order: i32,
+}
+
+/// Reply for controller commands (learn spam/ham, fuzzy add/del)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RspamdLearnReply {
+    #[serde(default)]
+    pub success: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Parse a scan reply body, honouring the `Message-Offset` header used by the
+/// `body_block` feature: when present and in bounds, the body carries JSON up
+/// to the offset followed by the rewritten message.
+pub fn parse_scan_reply(
+    message_offset: Option<&str>,
+    body: &[u8],
+) -> Result<RspamdScanReply, RspamdError> {
+    if let Some(offset_str) = message_offset {
+        let offset = offset_str
+            .parse::<usize>()
+            .map_err(|e| RspamdError::HttpError(format!("Invalid Message-Offset value: {}", e)))?;
+
+        if offset < body.len() {
+            // Split body into JSON part and rewritten body part
+            let mut response = serde_json::from_slice::<RspamdScanReply>(&body[..offset])?;
+            response.rewritten_body = Some(body[offset..].to_vec());
+            return Ok(response);
+        }
+        // Offset is out of bounds, parse entire body as JSON
+    }
+    Ok(serde_json::from_slice::<RspamdScanReply>(body)?)
 }

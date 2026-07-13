@@ -2,4 +2,4 @@ pub mod commands;
 pub mod encryption;
 pub mod scan;
 
-pub use scan::RspamdScanReply;
+pub use scan::{RspamdLearnReply, RspamdScanReply};

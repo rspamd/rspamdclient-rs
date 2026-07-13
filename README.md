@@ -6,6 +6,7 @@ This crate provides an HTTP client for interacting with the Rspamd service in Ru
 
 - **Sync/Async**: Choose between synchronous (`attohttpc`) or asynchronous (`reqwest`) client
 - **Mutually Exclusive**: Async and sync features are mutually exclusive by design
+- **Connection Pooling**: Persistent clients reuse TCP/TLS connections across scans (async)
 - **Encryption**: Native HTTPCrypt encryption support
 - **Compression**: ZSTD compression for requests and responses
 - **Local File Scanning**: Scan files on the same host without transferring body (`File` header)
@@ -20,7 +21,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rspamd-client = { version = "0.4", features = ["async"] }
+rspamd-client = { version = "0.7", features = ["async"] }
 ```
 
 Enable either the `sync` or `async` feature (but not both):
@@ -31,14 +32,21 @@ Enable either the `sync` or `async` feature (but not both):
 
 ### Asynchronous Client
 
+Create one `RspamdAsyncClient` and reuse it for all scans: the underlying
+`reqwest` client pools TCP (and TLS) connections, so subsequent scans skip
+connection setup entirely. The client is cheap to clone and `Send + Sync`,
+so it can be stored in a static or cached keyed by `Config` (which implements
+`Clone`, `Eq` and `Hash`).
+
 ```rust
-use rspamd_client::{Config, EnvelopeData, scan_async};
+use rspamd_client::{Config, EnvelopeData, RspamdAsyncClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .base_url("http://localhost:11333".to_string())
         .build();
+    let client = RspamdAsyncClient::new(config)?;
 
     let envelope = EnvelopeData::builder()
         .from("sender@example.com".to_string())
@@ -48,21 +56,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
 
-    let response = scan_async(&config, email, envelope).await?;
+    // Reuses the pooled connection on every call
+    let response = client.scan(email, envelope).await?;
     println!("Score: {}, Action: {}", response.score, response.action);
     Ok(())
 }
 ```
 
+For a single scan, the deprecated one-shot `scan_async(&config, email, envelope)`
+wrapper still works, but it opens a new connection on every call.
+
 ### Synchronous Client
 
 ```rust
-use rspamd_client::{Config, EnvelopeData, scan_sync};
+use rspamd_client::{Config, EnvelopeData, RspamdSyncClient};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .base_url("http://localhost:11333".to_string())
         .build();
+    let client = RspamdSyncClient::new(config)?;
 
     let envelope = EnvelopeData::builder()
         .from("sender@example.com".to_string())
@@ -70,10 +83,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
 
-    let response = scan_sync(&config, email, envelope)?;
+    let response = client.scan(email, envelope)?;
     println!("Score: {}, Action: {}", response.score, response.action);
     Ok(())
 }
+```
+
+Note: `attohttpc` does not pool connections, so the sync client reuses
+configuration and encryption state across calls, but each request still opens
+a fresh connection.
+
+### Learning and Fuzzy Storage
+
+Both clients expose the remaining commands (these target the controller
+endpoint, so point `base_url` at it and set `password`):
+
+```rust,ignore
+let reply = client.learn_spam(email, Default::default()).await?;
+let reply = client.learn_ham(email, Default::default()).await?;
+// Flag/Weight go via EnvelopeData::additional_headers
+let reply = client.fuzzy_add(email, envelope).await?;
+let reply = client.fuzzy_del(email, envelope).await?;
+assert!(reply.success);
 ```
 
 ## Advanced Features
@@ -83,13 +114,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 When the client and Rspamd server are on the same host, you can scan files without transferring the body by using the `file_path` option. This is a significant performance optimization:
 
 ```rust
-use rspamd_client::{Config, EnvelopeData, scan_async};
+use rspamd_client::{Config, EnvelopeData, RspamdAsyncClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .base_url("http://localhost:11333".to_string())
         .build();
+    let client = RspamdAsyncClient::new(config)?;
 
     let envelope = EnvelopeData::builder()
         .from("sender@example.com".to_string())
@@ -97,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build();
 
     // Empty body - file is read by Rspamd from disk
-    let response = scan_async(&config, "", envelope).await?;
+    let response = client.scan("", envelope).await?;
     println!("Scanned file with score: {}", response.score);
     Ok(())
 }
@@ -108,13 +140,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Request the rewritten message body from Rspamd when modifications are applied (e.g., subject rewriting, header changes):
 
 ```rust
-use rspamd_client::{Config, EnvelopeData, scan_async};
+use rspamd_client::{Config, EnvelopeData, RspamdAsyncClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder()
         .base_url("http://localhost:11333".to_string())
         .build();
+    let client = RspamdAsyncClient::new(config)?;
 
     let envelope = EnvelopeData::builder()
         .from("sender@example.com".to_string())
@@ -123,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let email = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nBody content.";
 
-    let response = scan_async(&config, email, envelope).await?;
+    let response = client.scan(email, envelope).await?;
 
     if let Some(rewritten_body) = response.rewritten_body {
         println!("Message was rewritten, new body size: {} bytes", rewritten_body.len());
@@ -180,7 +213,7 @@ let config = Config::builder()
 
 - `base_url`: Rspamd server URL (required)
 - `password`: Optional authentication password
-- `timeout`: Request timeout in seconds (default: 30.0)
+- `timeout`: Request timeout as a `std::time::Duration` (default: 30 seconds)
 - `retries`: Number of retry attempts (default: 1)
 - `zstd`: Enable ZSTD compression (default: true)
 - `encryption_key`: HTTPCrypt encryption key (optional)
