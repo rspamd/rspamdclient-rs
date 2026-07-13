@@ -102,7 +102,9 @@ impl RspamdAsyncClient {
         body: B,
         envelope_data: EnvelopeData,
     ) -> Result<RspamdScanReply, RspamdError> {
-        let (headers, body) = self.execute(RspamdCommand::Scan, body, envelope_data).await?;
+        let (headers, body) = self
+            .execute(RspamdCommand::Scan, body, envelope_data)
+            .await?;
 
         // Check for Message-Offset header to handle body_block feature
         let message_offset = headers
@@ -180,7 +182,10 @@ impl RspamdAsyncClient {
 }
 
 #[cfg(feature = "async")]
-#[deprecated(since = "0.7.0", note = "use RspamdAsyncClient::new for connection pooling")]
+#[deprecated(
+    since = "0.7.0",
+    note = "use RspamdAsyncClient::new for connection pooling"
+)]
 pub fn async_client(options: &Config) -> Result<RspamdAsyncClient, RspamdError> {
     RspamdAsyncClient::new(options.clone())
 }

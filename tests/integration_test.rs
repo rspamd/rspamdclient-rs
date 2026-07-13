@@ -4,7 +4,8 @@
 mod tests {
     use rspamd_client::config::{Config, EnvelopeData};
 
-    const EMAIL: &str = "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
+    const EMAIL: &str =
+        "From: user@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test email.";
 
     fn encrypted_config() -> Config {
         // Rspamd config side:

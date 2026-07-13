@@ -146,21 +146,27 @@ mod async_tests {
         let (url, _connections) = spawn_mock_server().await;
         let config = Config::builder().base_url(url).build();
         let client = RspamdAsyncClient::new(config).unwrap();
-        assert!(client
-            .learn_spam(EMAIL, Default::default())
-            .await
-            .unwrap()
-            .success);
-        assert!(client
-            .learn_ham(EMAIL, Default::default())
-            .await
-            .unwrap()
-            .success);
-        assert!(client
-            .fuzzy_add(EMAIL, Default::default())
-            .await
-            .unwrap()
-            .success);
+        assert!(
+            client
+                .learn_spam(EMAIL, Default::default())
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(
+            client
+                .learn_ham(EMAIL, Default::default())
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(
+            client
+                .fuzzy_add(EMAIL, Default::default())
+                .await
+                .unwrap()
+                .success
+        );
     }
 
     #[test]
@@ -237,7 +243,12 @@ mod sync_tests {
         let url = spawn_mock_server();
         let config = Config::builder().base_url(url).build();
         let client = RspamdSyncClient::new(config).unwrap();
-        assert!(client.learn_spam(EMAIL, Default::default()).unwrap().success);
+        assert!(
+            client
+                .learn_spam(EMAIL, Default::default())
+                .unwrap()
+                .success
+        );
         assert!(client.fuzzy_del(EMAIL, Default::default()).unwrap().success);
     }
 
