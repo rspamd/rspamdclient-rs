@@ -6,10 +6,8 @@
 
 use crate::error::RspamdError;
 use blake2b_simd::blake2b;
-use chacha20::cipher::consts::U64;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
-use chacha20::{cipher::consts::U10, cipher::zeroize::Zeroizing, hchacha, XChaCha20};
-use crypto_box::aead::generic_array::{arr, typenum::U32, GenericArray};
+use chacha20::{hchacha, XChaCha20, R20};
 use crypto_box::{
     aead::{AeadCore, OsRng},
     ChaChaBox, SecretKey,
@@ -19,11 +17,15 @@ use curve25519_dalek::{MontgomeryPoint, Scalar};
 use poly1305::universal_hash::KeyInit;
 use poly1305::{Poly1305, Tag};
 use rspamd_base32::{decode, encode};
+use zeroize::Zeroizing;
 
 /// It must be the same as Rspamd one, that is currently 5
 const SHORT_KEY_ID_SIZE: usize = 5;
 
-pub(crate) type RspamdNM = Zeroizing<GenericArray<u8, U32>>;
+/// XChaCha20 nonce size in bytes
+const NONCE_SIZE: usize = 24;
+
+pub(crate) type RspamdNM = Zeroizing<[u8; 32]>;
 
 pub struct RspamdSecretbox {
     enc_ctx: XChaCha20,
@@ -38,12 +40,12 @@ pub struct HTTPCryptEncrypted {
 
 impl RspamdSecretbox {
     /// Construct new secretbox following Rspamd conventions
-    pub fn new(key: RspamdNM, nonce: chacha20::XNonce) -> Self {
+    pub fn new(key: RspamdNM, nonce: &[u8; NONCE_SIZE]) -> Self {
         // Rspamd does it in a different way, doing full chacha20 round on the extended mac key
         let mut chacha = XChaCha20::new_from_slices(key.as_slice(), nonce.as_slice()).unwrap();
-        let mut mac_key: GenericArray<u8, U64> = GenericArray::default();
+        let mut mac_key = Zeroizing::new([0u8; 64]);
         chacha.apply_keystream(mac_key.as_mut());
-        let poly = Poly1305::new_from_slice(mac_key.split_at(32).0).unwrap();
+        let poly = Poly1305::new_from_slice(&mac_key[..32]).unwrap();
         RspamdSecretbox {
             enc_ctx: chacha,
             mac_ctx: poly,
@@ -97,9 +99,10 @@ impl HttpCryptContext {
     pub fn new(peer_key_b32: &str) -> Result<Self, RspamdError> {
         let decoded = decode(peer_key_b32)
             .map_err(|_| RspamdError::EncryptionError("Base32 decode failed".to_string()))?;
-        let peer_pk: [u8; 32] = decoded.as_slice().try_into().map_err(|_| {
-            RspamdError::EncryptionError("Invalid public key length".to_string())
-        })?;
+        let peer_pk: [u8; 32] = decoded
+            .as_slice()
+            .try_into()
+            .map_err(|_| RspamdError::EncryptionError("Invalid public key length".to_string()))?;
         let hash = blake2b(peer_pk.as_slice());
         let key_id_b32 = encode(&hash.as_bytes()[0..SHORT_KEY_ID_SIZE]);
         Ok(Self {
@@ -182,12 +185,9 @@ pub(crate) fn rspamd_x25519_scalarmult(
 
 /// Unlike IETF version, Rspamd uses an old suggested way to derive a shared secret - it performs
 /// hchacha iteration on the point and a zeroed nonce.
-pub(crate) fn rspamd_x25519_ecdh(
-    point: Zeroizing<MontgomeryPoint>,
-) -> Zeroizing<GenericArray<u8, U32>> {
-    let n0 =
-        arr![u8; 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,];
-    Zeroizing::new(hchacha::<U10>(&point.to_bytes().into(), &n0))
+pub(crate) fn rspamd_x25519_ecdh(point: Zeroizing<MontgomeryPoint>) -> RspamdNM {
+    let n0 = Default::default();
+    Zeroizing::new(hchacha::<R20>(&point.to_bytes().into(), &n0).into())
 }
 
 /// Encrypt a plaintext with a decoded peer public key and a local secret key.
@@ -196,12 +196,12 @@ fn encrypt_inplace(
     recipient_public_key: &[u8; 32],
     local_sk: &SecretKey,
 ) -> Result<(Vec<u8>, RspamdNM), RspamdError> {
-    let mut dest = Vec::with_capacity(plaintext.len() + 24 + poly1305::BLOCK_SIZE);
+    let mut dest = Vec::with_capacity(plaintext.len() + NONCE_SIZE + poly1305::BLOCK_SIZE);
     let ec_point = rspamd_x25519_scalarmult_raw(recipient_public_key, local_sk);
     let nm = rspamd_x25519_ecdh(ec_point);
 
-    let nonce = ChaChaBox::generate_nonce(&mut OsRng);
-    let cbox = RspamdSecretbox::new(nm.clone(), nonce);
+    let nonce: [u8; NONCE_SIZE] = ChaChaBox::generate_nonce(&mut OsRng).into();
+    let cbox = RspamdSecretbox::new(nm.clone(), &nonce);
     dest.extend_from_slice(nonce.as_slice());
     // Make room in the buffer for the tag. It needs to be prepended.
     dest.extend_from_slice(Tag::default().as_slice());
@@ -231,18 +231,20 @@ where
 
 /// Decrypts body using HTTPCrypt algorithm
 pub fn httpcrypt_decrypt(body: &mut [u8], nm: RspamdNM) -> Result<usize, RspamdError> {
-    if body.len() < 24 + poly1305::BLOCK_SIZE {
+    if body.len() < NONCE_SIZE + poly1305::BLOCK_SIZE {
         return Err(RspamdError::EncryptionError(
             "Invalid body size".to_string(),
         ));
     }
 
-    let (nonce, remain) = body.split_at_mut(24);
+    let (nonce, remain) = body.split_at_mut(NONCE_SIZE);
     let (tag, decrypted_dest) = remain.split_at_mut(poly1305::BLOCK_SIZE);
-    let tag = Tag::from_slice(tag);
+    let tag = Tag::try_from(&*tag)
+        .map_err(|_| RspamdError::EncryptionError("Invalid tag size".to_string()))?;
     let mut offset = nonce.len();
-    let mut sbox = RspamdSecretbox::new(nm, *chacha20::XNonce::from_slice(nonce));
-    offset += sbox.decrypt_in_place(decrypted_dest, tag)?;
+    let nonce: &[u8; NONCE_SIZE] = (&*nonce).try_into().unwrap();
+    let mut sbox = RspamdSecretbox::new(nm, nonce);
+    offset += sbox.decrypt_in_place(decrypted_dest, &tag)?;
     Ok(offset)
 }
 

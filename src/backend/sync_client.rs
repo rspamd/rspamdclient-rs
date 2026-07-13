@@ -234,11 +234,8 @@ impl<B: AsRef<[u8]>> Request for AttoRequest<B> {
                 } else {
                     Vec::new()
                 };
-                let encrypted = crypt.encrypt(
-                    url.path(),
-                    body.as_slice(),
-                    inner_req.inspect().headers(),
-                )?;
+                let encrypted =
+                    crypt.encrypt(url.path(), body.as_slice(), inner_req.inspect().headers())?;
                 req = self.client.inner.post(url).bytes(encrypted.body);
                 req = req.header("Key", crypt.key_header(encrypted.peer_key.as_str()));
                 maybe_sk = Some(encrypted.shared_key);
