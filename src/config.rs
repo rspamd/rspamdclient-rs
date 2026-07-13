@@ -80,39 +80,66 @@ pub struct EnvelopeData {
 
 impl IntoIterator for EnvelopeData {
     type Item = (String, String);
-    type IntoIter = std::collections::hash_map::IntoIter<String, String>;
+    type IntoIter = std::vec::IntoIter<(String, String)>;
 
-    /// Convert the EnvelopeData struct into an iterator
-    fn into_iter(mut self) -> Self::IntoIter {
-        // We add all options to the additional headers
+    /// Convert the EnvelopeData struct into an iterator of header pairs.
+    /// Keys may repeat: each recipient is emitted as a separate `Rcpt` header.
+    fn into_iter(self) -> Self::IntoIter {
+        let mut headers = Vec::with_capacity(self.rcpt.len() + self.additional_headers.len() + 7);
         if let Some(from) = self.from {
-            self.additional_headers.insert("From".to_string(), from);
+            headers.push(("From".to_string(), from));
         }
         if let Some(ip) = self.ip {
-            self.additional_headers.insert("IP".to_string(), ip);
+            headers.push(("IP".to_string(), ip));
         }
         if let Some(user) = self.user {
-            self.additional_headers.insert("User".to_string(), user);
+            headers.push(("User".to_string(), user));
         }
         if let Some(helo) = self.helo {
-            self.additional_headers.insert("Helo".to_string(), helo);
+            headers.push(("Helo".to_string(), helo));
         }
         if let Some(hostname) = self.hostname {
-            self.additional_headers
-                .insert("Hostname".to_string(), hostname);
+            headers.push(("Hostname".to_string(), hostname));
         }
         if let Some(file_path) = self.file_path {
-            self.additional_headers
-                .insert("File".to_string(), file_path);
+            headers.push(("File".to_string(), file_path));
         }
         if self.body_block {
-            self.additional_headers
-                .insert("Flags".to_string(), "body_block".to_string());
+            headers.push(("Flags".to_string(), "body_block".to_string()));
         }
         for rcpt in self.rcpt {
-            self.additional_headers.insert("Rcpt".to_string(), rcpt);
+            headers.push(("Rcpt".to_string(), rcpt));
         }
-        self.additional_headers.into_iter()
+        headers.extend(self.additional_headers);
+        headers.into_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn envelope_emits_one_rcpt_header_per_recipient() {
+        let envelope = EnvelopeData::builder()
+            .from("sender@example.com".to_string())
+            .rcpt(vec![
+                "one@example.com".to_string(),
+                "two@example.com".to_string(),
+                "three@example.com".to_string(),
+            ])
+            .build();
+
+        let headers: Vec<(String, String)> = envelope.into_iter().collect();
+        let rcpts: Vec<&str> = headers
+            .iter()
+            .filter(|(k, _)| k == "Rcpt")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(
+            rcpts,
+            ["one@example.com", "two@example.com", "three@example.com"]
+        );
     }
 }
 

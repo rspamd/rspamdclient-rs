@@ -7,7 +7,6 @@ use crate::protocol::RspamdScanReply;
 use bytes::{Bytes, BytesMut};
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::Client;
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
@@ -69,12 +68,12 @@ impl<'a, B: AsRef<[u8]> + Send> Request for ReqwestRequest<'a, B> {
     async fn response(mut self) -> Result<(Self::HeaderMap, Self::Body), RspamdError> {
         let mut retry_cnt = self.client.config.retries;
         let mut maybe_sk = Default::default();
-        let extra_hdrs: HashMap<String, String> =
-            HashMap::from_iter(self.envelope_data.take().unwrap());
+        let extra_hdrs: Vec<(String, String)> =
+            self.envelope_data.take().unwrap().into_iter().collect();
 
         let response = loop {
             // Check if File header is present - if so, we don't need to send the body
-            let has_file_header = extra_hdrs.contains_key("File");
+            let has_file_header = extra_hdrs.iter().any(|(k, _)| k == "File");
             let need_body = self.endpoint.need_body && !has_file_header;
             let method = if need_body {
                 reqwest::Method::POST

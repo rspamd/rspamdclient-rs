@@ -7,7 +7,6 @@ use crate::protocol::RspamdScanReply;
 use attohttpc::header::{HeaderMap, HeaderName, HeaderValue};
 use attohttpc::{self, ProxySettingsBuilder, Session};
 use bytes::Bytes;
-use std::collections::HashMap;
 use std::fs;
 use std::str::FromStr;
 use std::time::Duration;
@@ -62,12 +61,12 @@ impl<'a, B: AsRef<[u8]>> Request for AttoRequest<'a, B> {
     fn response(mut self) -> Result<(Self::HeaderMap, Self::Body), RspamdError> {
         let mut retry_cnt = self.client.config.retries;
         let mut maybe_sk = Default::default();
-        let extra_hdrs: HashMap<String, String> =
-            HashMap::from_iter(self.envelope_data.take().unwrap());
+        let extra_hdrs: Vec<(String, String)> =
+            self.envelope_data.take().unwrap().into_iter().collect();
 
         let response = loop {
             // Check if File header is present - if so, we don't need to send the body
-            let has_file_header = extra_hdrs.contains_key("File");
+            let has_file_header = extra_hdrs.iter().any(|(k, _)| k == "File");
             let need_body = self.endpoint.need_body && !has_file_header;
 
             let mut url = Url::from_str(self.client.config.base_url.as_str())
@@ -93,7 +92,9 @@ impl<'a, B: AsRef<[u8]>> Request for AttoRequest<'a, B> {
             .bytes(body);
 
             for (k, v) in extra_hdrs.iter() {
-                req = req.header(HeaderName::from_str(k.as_str()).unwrap(), v.clone());
+                // header_append keeps repeated keys (e.g. one Rcpt per recipient),
+                // while header() would overwrite the previous value
+                req = req.header_append(HeaderName::from_str(k.as_str()).unwrap(), v.clone());
             }
 
             if let Some(ref password) = self.client.config.password {
