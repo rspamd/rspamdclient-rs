@@ -11,7 +11,6 @@ use reqwest::Client;
 use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
-use zstd::zstd_safe::WriteBuf;
 
 /// Persistent asynchronous Rspamd client.
 ///
@@ -309,7 +308,7 @@ impl<B: AsRef<[u8]> + Send> Request for ReqwestRequest<B> {
             let mut parsed = httparse::Response::new(&mut hdrs);
 
             let body_offset = parsed
-                .parse(&body.as_slice()[decrypted_offset..])
+                .parse(&body[decrypted_offset..])
                 .map_err(|s| RspamdError::HttpError(s.to_string()))?;
             let mut output_hdrs = reqwest::header::HeaderMap::with_capacity(parsed.headers.len());
             for hdr in parsed.headers.iter_mut() {
@@ -322,9 +321,9 @@ impl<B: AsRef<[u8]> + Send> Request for ReqwestRequest<B> {
                 .get("Compression")
                 .is_some_and(|hv| hv == "zstd")
             {
-                zstd::decode_all(&body.as_slice()[body_offset.unwrap() + decrypted_offset..])?
+                zstd::decode_all(&body[body_offset.unwrap() + decrypted_offset..])?
             } else {
-                body.as_slice()[body_offset.unwrap() + decrypted_offset..].to_vec()
+                body[body_offset.unwrap() + decrypted_offset..].to_vec()
             };
             Ok((output_hdrs, body.into()))
         } else {
